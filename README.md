@@ -1,6 +1,6 @@
 # Cawnsole Bash Pass
 
-<img src="./Assets/icon-full.png" width="75"/>
+<img src="./Assets/icon-alt.png" width="75"/>
 
 Run terminal inside an active session from ssh, as if the terminal window was on screen.  
 
