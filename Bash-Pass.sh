@@ -1,62 +1,105 @@
 #!/bin/bash
 
-# Validate dependencies
-if ! command -v dialog &> /dev/null; then
-    echo "Error: Required dependency 'dialog' is not installed."
+# Validate dependencies and set TUI binary
+if command -v dialog &> /dev/null; then
+    TUI_CMD="dialog"
+elif command -v whiptail &> /dev/null; then
+    TUI_CMD="whiptail"
+else
+    echo "Error: Neither 'dialog' nor 'whiptail' is installed. Fix your shit."
     exit 1
 fi
 
-# Enforce elevated privileges for memory extraction
+# Validate permissions
 if [ "$EUID" -ne 0 ]; then
-    echo "Error: This script must be run as root (with sudo)."
+    echo "Error: Root privileges required run Bash Pass (run with sudo)."
     exit 1
 fi
 
-# Locate active KDE Plasma sessions
-PIDS=$(pgrep -x plasmashell)
+# UID Check
+OPTS=()
+ALPHABET=({A..Z} {A..Z}{A..Z})
+INDEX=0
 
-if [ -z "$PIDS" ]; then
+while IFS=: read -r username _ uid _ _ _ _; do
+    if [ "$uid" -ge 1000 ] && [ "$uid" -ne 65534 ]; then
+        # Check if active and harvest the oldest PID to anchor the display
+        if APEX_PID=$(pgrep -o -u "$username" 2>/dev/null); then
+            # Classify the session type
+            if pgrep -u "$username" | xargs -I{} grep -l -z "^WAYLAND_DISPLAY=" /proc/{}/environ 2>/dev/null | grep -q .; then
+                SESS_TYPE="Wayland"
+            elif pgrep -u "$username" | xargs -I{} grep -l -z "^DISPLAY=" /proc/{}/environ 2>/dev/null | grep -q .; then
+                SESS_TYPE="X11"
+            else
+                SESS_TYPE="Terminal"
+            fi
+            
+            # Format the menu strings
+            TAG="${ALPHABET[$INDEX]} - $username"
+            DESC="PID: $APEX_PID | $SESS_TYPE"
+            OPTS+=("$TAG" "$DESC")
+            ((INDEX++))
+        fi
+    fi
+done < /etc/passwd
+
+if [ ${#OPTS[@]} -eq 0 ]; then
     echo "Error: No active sessions detected."
     exit 1
 fi
 
-# Construct TUI menu array based on detected processes
-OPTS=()
-for pid in $PIDS; do
-    USER=$(ps -o user= -p "$pid" | tr -d ' ')
-    OPTS+=("$USER" "PID: $pid")
-done
-
-# Initialize the TUI dialog
-TARGET_USER=$(dialog --clear --title "Bash Pass Active" \
-    --menu "Select the target user session:" 10 50 4 \
-    "${OPTS[@]}" 2>&1 >/dev/tty)
+# Main screen
+MENU_SELECTION=$($TUI_CMD --title "Bash Pass" \
+    --menu "Select the active session to enter:" 12 50 4 \
+    "${OPTS[@]}" 3>&1 1>&2 2>&3)
 
 clear
 
-# Handle user cancellation
-if [ -z "$TARGET_USER" ]; then
-    echo "Operation aborted by user."
+# User cancellation
+if [ -z "$MENU_SELECTION" ]; then
+    echo "Exited."
     exit 0
 fi
 
-# Isolate the specific PID for the chosen user
-TARGET_PID=$(pgrep -u "$TARGET_USER" -x plasmashell | head -n 1)
+# Extract the bare username
+TARGET_USER="${MENU_SELECTION#* - }"
 
-# Extract environment variables from the active session
-export WAYLAND_DISPLAY=$(grep -z "^WAYLAND_DISPLAY=" /proc/"$TARGET_PID"/environ | cut -d= -f2 | tr -d '\0')
-export DISPLAY=$(grep -z "^DISPLAY=" /proc/"$TARGET_PID"/environ | cut -d= -f2 | tr -d '\0')
-export XDG_RUNTIME_DIR=$(grep -z "^XDG_RUNTIME_DIR=" /proc/"$TARGET_PID"/environ | cut -d= -f2 | tr -d '\0')
-export DBUS_SESSION_BUS_ADDRESS=$(grep -z "^DBUS_SESSION_BUS_ADDRESS=" /proc/"$TARGET_PID"/environ | cut -d= -f2- | tr -d '\0')
+# Telemetry Targetting
+extract_telemetry() {
+    local user="$1"
+    local target_var="$2"
+    
+    # Sift for target
+    for pid in $(pgrep -u "$user"); do
+        local val=$(grep -z "^${target_var}=" /proc/"$pid"/environ 2>/dev/null | cut -d= -f2- | tr -d '\0')
+        if [ -n "$val" ]; then
+            echo "$val"
+            return 0
+        fi
+    done
+}
 
-# Confirm extraction and format output
-echo "Environment variables successfully extracted:"
-echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-echo "DISPLAY=$DISPLAY"
-echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
-echo "DBUS=$DBUS_SESSION_BUS_ADDRESS"
+# Environment variable telemetry
+WAYLAND_DISPLAY=$(extract_telemetry "$TARGET_USER" "WAYLAND_DISPLAY")
+DISPLAY=$(extract_telemetry "$TARGET_USER" "DISPLAY")
+XDG_RUNTIME_DIR=$(extract_telemetry "$TARGET_USER" "XDG_RUNTIME_DIR")
+DBUS_SESSION_BUS_ADDRESS=$(extract_telemetry "$TARGET_USER" "DBUS_SESSION_BUS_ADDRESS")
+
+# Format and confirm output
+echo "Your Bash Pass:"
+echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-[Null]}"
+echo "DISPLAY=${DISPLAY:-[Null]}"
+echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-[Null]}"
+echo "DBUS=${DBUS_SESSION_BUS_ADDRESS:-[Null]}"
 echo ""
-echo "Initialized pass for user: $TARGET_USER"
+echo "Presenting pass to system..."
 
-# Downgrade privileges and spawn the shell with preserved environment variables
-sudo --preserve-env=WAYLAND_DISPLAY,DISPLAY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS -u "$TARGET_USER" /bin/bash
+# Export the variables
+export WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+
+# Downgrade privileges and start the shell with injected payload
+sudo --preserve-env=WAYLAND_DISPLAY,DISPLAY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS -u "$TARGET_USER" /bin/bash -c "echo ''; echo 'Bash Pass Accepted. Welcome $TARGET_USER.'; echo ''; exec /bin/bash"
+
+echo ""
+echo "Bash Pass Session Ended."
+echo ""
