@@ -26,7 +26,7 @@ Run terminal inside an active session from ssh, as if the terminal window was on
 
 **Bash Pass is meant to be used through SSH from another device.**
 
-1. Connect to a host with Bash Pass, run the shell **with sudo privilege**. 
+1. Connect to a host with Bash Pass, run the Bash-Pass.sh script **with sudo privilege**. 
 2. A menu will appear showing the detected sessions. Using the keyboard select the desired session. 
 3. After selection of the desired session, the menu will automatically close and the terminal will clear and confirm the new session you are controlling.<br><img src="./Assets/pass.png" width="350"/><br>
 *This is an example showing Bash Pass signing into a session for a user named "crow" on a system named "Cawnsole".*
