@@ -1,4 +1,4 @@
-# Cawnsole Bash Pass
+# Cawnsole — Bash Pass
 
 <img src="./Assets/Icon-full.png" width="75"/><br>
 
