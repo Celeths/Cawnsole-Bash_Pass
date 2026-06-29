@@ -19,8 +19,8 @@ Run terminal inside an active session from ssh, as if the terminal window was on
 ## Installation & Use
 ### Installation Steps
 
-1. Download the latest bash-pass.sh file from the releases.
-2. Move the bash-pass.sh file anywhere desired on the host system.
+1. Download the latest Bash-Pass.sh file from the releases.
+2. Move the Bash-Pass.sh file anywhere desired on the host system.
 
 ### Using Bash Pass
 
