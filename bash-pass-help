@@ -1,0 +1,211 @@
+#!/bin/bash
+# ============================================================================
+# bash-pass-help
+# The -help output for Bash Pass, styled per styling.md (role-based rules).
+# IMPORT:  source this file from a context where the style variables are
+#          defined (e.g. TEST-FILE_styled-feedback.sh, or pass once
+#          the help feature is wired in). It also runs standalone — it
+#          defines its own style variables below.
+#
+# Layout: each argument and its full explanation stay on ONE row (spaces pad
+# the explanation to column 24 — space padding so alignment holds at any
+# terminal tab width); example lines sit on their own rows at the same
+# column. No set line lengths — text flows naturally and the terminal wraps
+# it; the padding keeps every line's start at the same x.
+#
+# Styling applied (see TEST_FILES/TEST-FILE_styling-map.md, row C1):
+#   - title + subtitle header (F2/F4); headings bold (structural)
+#   - flags = bright yellow (C4 bright); [PLACEHOLDERS] & example values yellow
+#   - "Bash Pass" = bright green (C8 bright)
+#   - quoted example strings & locations/URLs -> underlined (F7/F8) + yellow
+#   - verbs/adverbs -> cyan (C7); numbers/times -> bright blue (C6)
+# The original pass script is NOT modified by this file.
+# ============================================================================
+
+if [ -t 1 ]; then
+    RED=$(tput setaf 1)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    BLUE=$(tput setaf 4)
+    MAGENTA=$(tput setaf 5)
+    CYAN=$(tput setaf 6)
+    BRIGHT_RED=$(tput setaf 9)
+    BRIGHT_GREEN=$(tput setaf 10)
+    BRIGHT_YELLOW=$(tput setaf 11)
+    BRIGHT_BLUE=$(tput setaf 12)
+    BOLD=$(tput bold)
+    BLINK=$(tput blink)
+    ULINE=$(tput smul)
+    R_ULINE=$(tput rmul)
+    RESET=$(tput sgr0)
+else
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""
+    BRIGHT_RED=""; BRIGHT_GREEN=""; BRIGHT_BLUE=""; BRIGHT_YELLOW=""
+    BOLD=""; BLINK=""; ULINE=""; R_ULINE=""; RESET=""
+fi
+
+# wrap: reflow lines that overflow the terminal so wrapped continuation
+# lines keep the 24-space indent (column 24). Lines that fit pass through
+# untouched. ANSI sequences are skipped when measuring width.
+wrap() {
+    local cols indent narrow
+    cols="${COLUMNS:-}"
+    [ -z "$cols" ] && cols=$(tput cols 2>/dev/null)
+    [ -z "$cols" ] && cols=$(stty size 2>/dev/null | awk '{print $2}')
+    case "$cols" in ''|*[!0-9]*) cols=80 ;; esac
+    # Below 40 cols the layout behaves the same but with the padding
+    # shrunk to one third (column 24 -> column 8) everywhere.
+    if [ "$cols" -gt 40 ]; then
+        indent='                        '
+        narrow=0
+    else
+        indent='        '
+        narrow=1
+    fi
+    awk -v cols="$cols" -v indent="$indent" -v narrow="$narrow" '
+    # endcol: display column after s, starting at col; tabs expand to the
+    # next 8-column stop, ANSI sequences are zero-width.
+    function endcol(s, col,   i, n, c) {
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "\033") { while (i < n && substr(s, i, 1) != "m") i++ }
+            else if (c == "\t") { col = col + 8 - (col % 8) }
+            else col++
+        }
+        return col
+    }
+    # scansgr: update the open-SGR state (escape sequences since the last
+    # RESET) after processing s, so wrapped lines can close it before the
+    # padding and re-apply it after — underlined text never leaks into the
+    # continuation padding.
+    function scansgr(s, open,   i, n, c, seq) {
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c != "\033") continue
+            seq = c; i++
+            while (i <= n && substr(s, i, 1) != "m") { seq = seq substr(s, i, 1); i++ }
+            if (i <= n) seq = seq "m"
+            if (seq == "\033(B") continue
+            if (seq == "\033[m" || seq == "\033[0m") open = ""
+            else open = open seq
+        }
+        return open
+    }
+    # shrinkpad: narrow mode only — find the first run of 4+ spaces (the
+    # flag-row description padding, or the example-row lead) and re-pad it
+    # so the text after it lands at column 8 (one third of column 24).
+    function shrinkpad(line,   i, n, j, col, pad, p, out) {
+        n = length(line)
+        i = 1
+        while (i <= n) {
+            if (substr(line, i, 1) == " ") {
+                j = i
+                while (j <= n && substr(line, j, 1) == " ") j++
+                if (j - i >= 4) {
+                    col = endcol(substr(line, 1, i - 1), 0)
+                    pad = 8 - col
+                    if (pad < 1) pad = 1
+                    out = substr(line, 1, i - 1)
+                    for (p = 1; p <= pad; p++) out = out " "
+                    return out substr(line, j)
+                }
+                i = j
+            } else i++
+        }
+        return line
+    }
+    {
+        line = $0
+        if (narrow) line = shrinkpad(line)
+        if (endcol(line, 0) <= cols) { print; next }
+        lead = ""
+        i = 1; n = length(line)
+        while (i <= n && substr(line, i, 1) == " ") { lead = lead " "; i++ }
+        chunk = lead
+        col = length(lead)
+        open = ""
+        while (i <= n) {
+            j = i
+            while (j <= n && substr(line, j, 1) != " ") j++
+            word = substr(line, i, j - i)
+            k = j
+            while (k <= n && substr(line, k, 1) == " ") k++
+            spaces = substr(line, j, k - j)
+            unit = word spaces
+            uend = endcol(unit, col)
+            if (col > 0 && uend > cols) {
+                print chunk "\033[0m"
+                chunk = indent open word spaces
+                col = endcol(unit, endcol(indent open, 0))
+            } else {
+                chunk = chunk unit
+                col = uend
+            }
+            open = scansgr(unit, open)
+            i = k
+        }
+        if (chunk != "") print chunk "\033[0m"
+    }'
+}
+
+echo "${BRIGHT_GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${CYAN}${BOLD}Help${RESET}"
+echo
+echo "${BOLD}What is ${BRIGHT_GREEN}Bash Pass${RESET}${BOLD}?${RESET}"
+echo "${BRIGHT_GREEN}Bash Pass${RESET} is a ${GREEN}system tool${RESET} for ${CYAN}parasitising${RESET} ${GREEN}active${RESET} ${YELLOW}system ${BRIGHT_BLUE}sessions${RESET}."
+echo
+echo "${BOLD}How do I use ${BRIGHT_GREEN}Bash Pass${RESET}${BOLD}?${RESET}"
+echo "${BRIGHT_BLUE}1.${RESET} ${CYAN}Using${RESET} ${BRIGHT_GREEN}Bash Pass${RESET} is as simple as ${CYAN}running${RESET} the ${BRIGHT_GREEN}main script${RESET} with ${GREEN}${ULINE}root privilege${RESET}."
+echo "${BRIGHT_BLUE}2.${RESET} ${CYAN}Running${RESET} ${BRIGHT_GREEN}Bash Pass${RESET} normally will ${CYAN}walk you through${RESET} the ${MAGENTA}interface${RESET} with ${YELLOW}${ULINE}feedback and prompts${RESET}."
+echo "${BRIGHT_BLUE}3.${RESET} ${BRIGHT_GREEN}Bash Pass${RESET} can be ${CYAN}used${RESET} with a ${YELLOW}variety of ${ULINE}arguments${RESET} to allow ${GREEN}advanced workflows${RESET}."
+echo
+echo "${BOLD}${BRIGHT_YELLOW}Arguments:${RESET}"
+echo "There is a ${GREEN}wide arrangement${RESET} of ${YELLOW}arguments${RESET} that can ${CYAN}modify the behaviour${RESET} of ${BRIGHT_GREEN}Bash Pass${RESET}."
+echo "${CYAN}Using${RESET} ${YELLOW}multiple arguments${RESET} together is possible, and ${RED}does ${ULINE}not${RESET} require a ${GREEN}set order${RESET}."
+echo
+echo " ${BRIGHT_YELLOW}-assist${RESET}                ${CYAN}Causes the list selection to render with dialog${RESET}." | wrap
+echo "                        ${MAGENTA}example:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-assist${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-silent${RESET}                ${CYAN}Suppresses all feedback other than input querying${RESET} (${CYAN}combine with other arguments to skip/ avoid input querying and suppress all feedback${RESET}). This helps with embedding ${BRIGHT_GREEN}Bash Pass${RESET} into ${GREEN}workflows${RESET}." | wrap
+echo "                        ${MAGENTA}example:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-silent${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-pass${RESET}                  ${YELLOW}[DESTINATION]${RESET} ${CYAN}Skips showing a list and auto-selects the first ${BRIGHT_BLUE}session${RESET} match${RESET} for ${YELLOW}[DESTINATION]${RESET}, if the ${YELLOW}[DESTINATION] variable${RESET} is ${RED}missing${RESET}, the ${CYAN}first indexed ${BRIGHT_BLUE}session${RESET} is auto-selected${RESET}. ${YELLOW}[DESTINATION]${RESET} also ${GREEN}has${RESET} two ${YELLOW}special variables${RESET}; \"${ULINE}${YELLOW}oldest${RESET}\" (${CYAN}selects the oldest ${BRIGHT_BLUE}session${RESET}) & \"${ULINE}${YELLOW}latest${RESET}\" (${CYAN}selects the newest ${BRIGHT_BLUE}session${RESET})." | wrap
+echo "                        ${MAGENTA}examples:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-pass${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-pass${RESET} ${YELLOW}guest${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-pass${RESET} ${YELLOW}oldest${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}--pass${RESET}                 ${YELLOW}[DESTINATION]${RESET} Identical to ${YELLOW}${ULINE}-pass${RESET}, but ${YELLOW}[DESTINATION]${RESET} is ${RED}required${RESET}; ${CYAN}on failure there is an${RESET} ${RED}error${RESET} and ${BRIGHT_GREEN}Bash Pass${RESET} ${RED}does ${ULINE}not${RESET} ${RED}run${RESET}." | wrap
+echo "                        ${MAGENTA}example:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}--pass${RESET} ${YELLOW}guest${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-location${RESET}              ${YELLOW}[PATH]${RESET} ${CYAN}Changes the default destination from${RESET} ${ULINE}${GREEN}/home/[user]/${RESET} ${CYAN}to${RESET} ${YELLOW}[PATH]${RESET}. ${YELLOW}[PATH]${RESET} ${GREEN}supports${RESET} ${ULINE}${YELLOW}~/${RESET} as shorthand for ${ULINE}${GREEN}/home/[user]/${RESET}. If finding ${YELLOW}[PATH]${RESET} ${RED}fails${RESET}, ${CYAN}the${RESET} ${GREEN}destination${RESET} ${CYAN}will revert to${RESET} ${ULINE}${YELLOW}/home/[user]/${RESET}." | wrap
+echo "                        ${MAGENTA}examples:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-location${RESET} ${ULINE}${YELLOW}/tmp${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-location${RESET} ${ULINE}${YELLOW}~/Desktop${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}--location${RESET}             ${YELLOW}[PATH]${RESET} Identical to ${YELLOW}${ULINE}-location${RESET}, but ${CYAN}on failure there is an${RESET} ${RED}error${RESET} and ${BRIGHT_GREEN}Bash Pass${RESET} ${RED}does ${ULINE}not${RESET} ${RED}run${RESET}." | wrap
+echo
+echo " ${BRIGHT_YELLOW}-first${RESET}                 ${YELLOW}[CMD]${RESET}     ${CYAN}Executes${RESET} ${YELLOW}[CMD]${RESET} ${CYAN}automatically upon${RESET} ${GREEN}connection${RESET} ${CYAN}to a ${BRIGHT_BLUE}session${RESET}." | wrap
+echo "                        ${MAGENTA}examples:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-first${RESET} ${ULINE}${YELLOW}\"echo 'I am Here!'\"${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-first${RESET} ${YELLOW}firefox${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-last${RESET}                  ${YELLOW}[CMD]${RESET}      ${CYAN}Executes${RESET} ${YELLOW}[CMD]${RESET} ${CYAN}automatically right before${RESET} ${RED}disconnection${RESET} ${CYAN}from a ${BRIGHT_BLUE}session${RESET}." | wrap
+echo "                        ${MAGENTA}example:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-last${RESET} ${ULINE}${YELLOW}\"echo 'See you later!'\"${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-only${RESET}                  ${YELLOW}[CMD]${RESET}      ${CYAN}Executes${RESET} ${YELLOW}[CMD]${RESET} ${CYAN}automatically upon${RESET} ${GREEN}connection${RESET} ${CYAN}to a${RESET} ${BRIGHT_BLUE}session${RESET}, and ${CYAN}then immediately${RESET} ${RED}exits${RESET} ${CYAN}the${RESET} ${BRIGHT_BLUE}session${RESET}. This ${YELLOW}argument${RESET} ${BRIGHT_RED}cannot${RESET} be used ${CYAN}simultaneously${RESET} with ${ULINE}${YELLOW}-first${RESET} or ${ULINE}${YELLOW}-last${RESET}." | wrap
+echo "                        ${MAGENTA}example:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-only${RESET} ${ULINE}${YELLOW}\"shutdown -r now\"${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-audit${RESET}                 ${YELLOW}[PATH]${RESET}    ${CYAN}Saves a clean output of the entire${RESET} ${BRIGHT_BLUE}session${RESET} ${CYAN}interaction at${RESET} ${ULINE}${GREEN}/tmp/bash-pass/audits/${RESET}. ${CYAN}Defining${RESET} ${YELLOW}[PATH]${RESET} is ${YELLOW}optional${RESET}, and ${CYAN}will change the audit save${RESET} ${GREEN}location${RESET}." | wrap
+echo "                        ${MAGENTA}examples:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-audit${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-audit${RESET} ${ULINE}${YELLOW}/etc/audits${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-audit${RESET} ${ULINE}${YELLOW}\"~/Desktop/Audit Files\"${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}--audit${RESET}                ${YELLOW}[PATH]${RESET}   Identical to ${YELLOW}${ULINE}-audit${RESET}, except ${CYAN}all raw terminal output for the${RESET} ${BRIGHT_BLUE}session${RESET} ${CYAN}interaction is saved${RESET}." | wrap
+echo
+echo " ${BRIGHT_YELLOW}-wanted${RESET}                ${YELLOW}[STR]${RESET} ${YELLOW}[CMD]${RESET} ${CYAN}Monitors all terminal text during${RESET} ${BRIGHT_BLUE}session${RESET} ${CYAN}interaction for an exact match for${RESET} ${YELLOW}[STR]${RESET}, ${CYAN}then${RESET} ${RED}ends${RESET} ${BRIGHT_BLUE}session${RESET} ${CYAN}interaction upon a match${RESET}. The optional ${YELLOW}[CMD]${RESET} ${CYAN}will change behaviour from ${RED}ending${RESET} the${RESET} ${BRIGHT_BLUE}session${RESET} ${CYAN}interaction to${RESET} ${GREEN}executing${RESET} ${CYAN}any string defined as${RESET} ${YELLOW}[CMD]${RESET}." | wrap
+echo "                        ${MAGENTA}examples:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-wanted${RESET} ${YELLOW}error${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-wanted${RESET} ${ULINE}${YELLOW}\"All Clear\"${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-wanted${RESET} ${YELLOW}ready${RESET} ${ULINE}${YELLOW}\"go build\"${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-wanted${RESET} ${ULINE}${YELLOW}\"not found\"${RESET} ${ULINE}${YELLOW}\"echo 'HERE'\"${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-timer${RESET}                 ${YELLOW}[TIME]${RESET}    ${CYAN}Triggers ${RED}disconnection${RESET} of the ${BRIGHT_BLUE}session${RESET} ${CYAN}interaction once${RESET} ${YELLOW}[TIME]${RESET} ${CYAN}is reached${RESET}. The ${YELLOW}[TIME]${RESET} format ${GREEN}can be${RESET} ${YELLOW}varied${RESET} (examples show the various formats). An ${YELLOW}optional${RESET} ${YELLOW}[WARNTIME]${RESET} ${CYAN}triggers${RESET} a ${YELLOW}single warning${RESET} once it has ${RED}elapsed${RESET} (default missing is none, no warning). An ${YELLOW}optional${RESET} ${YELLOW}[WARNEXEC]${RESET} ${CYAN}executes${RESET} a ${YELLOW}command${RESET} when the warning fires, ${CYAN}including${RESET} with ${YELLOW}${ULINE}-silent${RESET}." | wrap
+echo "                        ${MAGENTA}examples:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-timer${RESET} ${YELLOW}1.5d${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-timer${RESET} ${YELLOW}2D3H${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-timer${RESET} ${YELLOW}10m${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-timer${RESET} ${YELLOW}100s${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-timer${RESET} ${YELLOW}1h${RESET} ${YELLOW}10m${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-timer${RESET} ${YELLOW}3m${RESET} ${YELLOW}25s${RESET} ${YELLOW}\"echo 'running out'\"${RESET}" | wrap
+echo " ${BRIGHT_YELLOW}--timer${RESET}                ${YELLOW}[TIME]${RESET}    Identical to ${YELLOW}${ULINE}-timer${RESET}, but ${CYAN}instead of disconnecting${RESET} on expiry it ${CYAN}executes${RESET} ${YELLOW}[TIMEXEC]${RESET}. May be ${CYAN}repeated${RESET} for ${YELLOW}multiple timers${RESET}; each gets the ${YELLOW}standard warning${RESET} (${RED}suppressed${RESET} with ${YELLOW}${ULINE}-silent${RESET}, the command ${GREEN}still runs${RESET})." | wrap
+echo "                        ${MAGENTA}example:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}--timer${RESET} ${YELLOW}10s${RESET} ${YELLOW}\"echo 'get started'\"${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}--timer${RESET} ${YELLOW}20s${RESET} ${YELLOW}\"echo 'wind down'\"${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-list${RESET}                  ${YELLOW}[SORT]${RESET}     ${CYAN}Displays available${RESET} ${BRIGHT_BLUE}sessions${RESET}. ${YELLOW}[SORT]${RESET} is an ${YELLOW}optional${RESET} filter variable that ${CYAN}filters${RESET} ${BRIGHT_BLUE}sessions${RESET} ${CYAN}by${RESET} ${YELLOW}[SORT]${RESET}." | wrap
+echo "                        ${MAGENTA}examples:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-list${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${BRIGHT_YELLOW}-list${RESET} ${YELLOW}wayland${RESET}, ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-list${RESET} ${YELLOW}x${RESET}" | wrap
+echo
+echo " ${BRIGHT_YELLOW}-help${RESET}                  ${CYAN}Displays the default${RESET} ${GREEN}help text${RESET}. ${YELLOW}--help${RESET} and ${YELLOW}-h${RESET} ${GREEN}also work${RESET}. ${BOLD}You are here${RESET}." | wrap
+echo " ${BRIGHT_YELLOW}-version${RESET}               ${CYAN}Displays the current${RESET} ${GREEN}version number${RESET}. ${YELLOW}--version${RESET} ${GREEN}also works${RESET}." | wrap
+echo "                        ${MAGENTA}example:${RESET} ${BRIGHT_GREEN}[Bash Pass RUN]${RESET} ${YELLOW}-help${RESET}" | wrap

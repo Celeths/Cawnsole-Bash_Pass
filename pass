@@ -1,0 +1,1158 @@
+#!/bin/bash
+
+if [ -t 1 ]; then
+    # Terminal Styling — when invoked with TERM unset, sudo sets TERM=dumb and
+    # tput yields nothing; give interactive runs a sane terminal for styling.
+    [ "$TERM" = "dumb" ] && TERM=xterm-256color
+    RED=$(tput setaf 1)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    BLUE=$(tput setaf 4)
+    MAGENTA=$(tput setaf 5)
+    CYAN=$(tput setaf 6)
+    BRIGHT_RED=$(tput setaf 9)
+    BRIGHT_GREEN=$(tput setaf 10)
+    BRIGHT_YELLOW=$(tput setaf 11)
+    BRIGHT_BLUE=$(tput setaf 12)
+    BOLD=$(tput bold)
+    BLINK=$(tput blink)
+    ULINE=$(tput smul)
+    R_ULINE=$(tput rmul)
+    RESET=$(tput sgr0)
+# Background-Running Chroma Purge (for better logs & integrations)
+else
+    RED=""
+    GREEN=""
+    YELLOW=""
+    BLUE=""
+    MAGENTA=""
+    CYAN=""
+    BRIGHT_RED=""
+    BRIGHT_GREEN=""
+    BRIGHT_YELLOW=""
+    BRIGHT_BLUE=""
+    BOLD=""
+    BLINK=""
+    ULINE=""
+    R_ULINE=""
+    RESET=""
+fi
+
+# App version (displayed by -version / --version)
+VERSION="2.0"
+
+# --- Shared feedback blocks (each emitted at most once per run) -------------
+# Headers are split out from their messages so a header never prints twice
+# even when several messages fire in one run. Styling per styling.md:
+# title = GREEN ULINE BOLD; subtitles = BOLD (Error red, Notice yellow,
+# Accepted green, Wanted yellow, Rescinded green, ...). The _SHOWN flags are
+# exported so the session shell (payload) can inherit the parent's state.
+export BP_ERROR_SHOWN=0 BP_NOTICE_SHOWN=0 BP_TITLE_SHOWN=0 BP_ACCEPTED_SHOWN=0 \
+       BP_WANTED_SHOWN=0 BP_RESCINDED_SHOWN=0 BP_TIMER_END_SHOWN=0 BP_ASSIGN_SHOWN=0
+
+bp_error() {   # "Bash Pass Error"
+    [ "$BP_ERROR_SHOWN" -eq 1 ] && return
+    printf "${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${RED}${BOLD}Error${RESET}\n"
+    BP_ERROR_SHOWN=1
+}
+bp_notice() {  # "Bash Pass Notice"
+    [ "$BP_NOTICE_SHOWN" -eq 1 ] && return
+    printf "${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Notice${RESET}\n"
+    BP_NOTICE_SHOWN=1
+}
+bp_title() {   # bare "Bash Pass"
+    [ "$BP_TITLE_SHOWN" -eq 1 ] && return
+    printf "${GREEN}${ULINE}${BOLD}Bash Pass${RESET}\n"
+    BP_TITLE_SHOWN=1
+}
+bp_accepted() { # "Bash Pass Accepted"
+    [ "$BP_ACCEPTED_SHOWN" -eq 1 ] && return
+    printf "${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${GREEN}${BOLD}Accepted${RESET}\n"
+    BP_ACCEPTED_SHOWN=1
+}
+bp_wanted() {  # "\r\nBash Pass Wanted\r\n"
+    [ "$BP_WANTED_SHOWN" -eq 1 ] && return
+    printf "\r\n${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Wanted${RESET}\r\n"
+    BP_WANTED_SHOWN=1
+}
+bp_rescinded() { # "\r\nBash Pass Rescinded\r\n"
+    [ "$BP_RESCINDED_SHOWN" -eq 1 ] && return
+    printf "\r\n${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${RED}${BOLD}Rescinded${RESET} ${GREEN}${BOLD}Successfully${RESET}\r\n"
+    BP_RESCINDED_SHOWN=1
+}
+bp_timer_end() { # "\r\nBash Pass Timer Expired / Session Terminated\r\n"
+    [ "$BP_TIMER_END_SHOWN" -eq 1 ] && return
+    if [ "$TERMINATED_BY_TIMER" -eq 1 ]; then
+        printf "\r\n${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Timer${RESET} ${RED}${BOLD}Expired${RESET}\r\n"
+    else
+        printf "\r\n${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${BRIGHT_BLUE}${BOLD}Session${RESET} ${RED}${BOLD}Terminated${RESET}\r\n"
+    fi
+    BP_TIMER_END_SHOWN=1
+}
+bp_assign() {  # "Automatically Assigning Pass" (banner subtitle)
+    [ "$BP_ASSIGN_SHOWN" -eq 1 ] && return
+    printf "${GREEN}Automatically${RESET} ${CYAN}Assigning${RESET} ${BRIGHT_GREEN}Pass${RESET}\n"
+    BP_ASSIGN_SHOWN=1
+}
+
+# Terminal-identity variables describe the CLIENT's terminal (the display
+# surface the user is actually looking at), NOT the target session's. They
+# must never be grafted from the leader's session later on, or TUI apps
+# (htop, vim, tmux, ...) will render with the target session's terminal
+# capabilities — e.g. TERM=linux from a console session, or no TERM at all
+# from a GUI-app leader — instead of the caller's, killing colours.
+TERM_IDENTITY_NAMES=(TERM TERMCAP COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION VTE_VERSION KONSOLE_PROFILE_NAME COLORFGBG NO_COLOR)
+TERM_IDENTITY=()
+for TV in "${TERM_IDENTITY_NAMES[@]}"; do
+    [ -n "${!TV:-}" ] && TERM_IDENTITY+=("$TV=${!TV}")
+done
+
+# Argument Check Module
+HAS_ARGS=0
+SILENT=0
+LIST=0
+ASSIST=0
+SORT=""
+PASS_DEST=""
+PASS_FIRST=0
+ONLY_CMD=""
+FIRST_CMD=""
+LAST_CMD=""
+TIMER=""
+WARNTIME=""
+WARNEXEC=""
+TIMEXEC_SECS=()
+TIMEXEC_CMDS=()
+WARNED=0
+LOCATION=""
+STRICT_LOC=1
+LOC_FALLBACK=0
+FAILED_LOC=""
+AUDIT_MODE=""
+AUDIT_PATH=""
+AUDIT_FALLBACK=0
+AUDIT_NAME_CONFLICT=0
+DESIRED_AUDIT_FILE=""
+DESIRED_AUDIT_DIR=""
+CUSTOM_AUDIT_PATH=""
+WANTED_STR=""
+WANTED_CMD=""
+
+# fmt_duration: format a second count in compact units — 600 → "10m",
+# 605 → "10m5s", 3665 → "1h1m5s" (zero units are omitted, seconds included
+# only when non-zero).
+fmt_duration() {
+    local secs=$1 out="" d h m s
+    d=$((secs / 86400)); secs=$((secs % 86400))
+    h=$((secs / 3600)); secs=$((secs % 3600))
+    m=$((secs / 60)); s=$((secs % 60))
+    [ "$d" -gt 0 ] && out+="${d}d"
+    [ "$h" -gt 0 ] && out+="${h}h"
+    [ "$m" -gt 0 ] && out+="${m}m"
+    [ "$s" -gt 0 ] && out+="${s}s"
+    [ -z "$out" ] && out="${s}s"
+    printf '%s' "$out"
+}
+
+# warn_expired: the standard timer warning — header + the expired value, plus
+# the remaining-time line when a remaining value is given. Interrupting the
+# session shell re-issues its prompt (echoctl is off, so no ^C is shown).
+warn_expired() {
+    printf "\r\n${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Timer Warning${RESET} ${RED}${BOLD}Expired${RESET}\r\n"
+    printf "Your ${YELLOW}timer warning${RESET} for ${ULINE}${BRIGHT_BLUE}$(fmt_duration "$1")${RESET} has ${RED}expired${RESET}\r\n"
+    if [ -n "$2" ]; then
+        printf "Your ${YELLOW}timer${RESET} has ${ULINE}${BRIGHT_BLUE}$(fmt_duration "$2")${RESET} ${YELLOW}remaining${RESET}\r\n"
+    fi
+    B_PID=$(pgrep -f "bash --rcfile $PAYLOAD" 2>/dev/null | tail -n 1)
+    [ -n "$B_PID" ] && kill -INT "$B_PID" 2>/dev/null
+}
+
+# sq: escape single quotes so a value can be embedded safely inside the payload's
+# single-quoted echo -e lines (e.g. an audit path containing a quote).
+sq() {
+    printf '%s' "${1//\'/\'\\\'\'}"
+}
+
+# parse_time: convert a time string (e.g. 3.5d, 5D2H, 30m, 10s) to seconds.
+# Echoes "INVALID" when the format is not recognized or totals <= 0.
+parse_time() {
+    echo "$1" | awk '{
+        str = tolower($0);
+        total = 0;
+        num = "";
+        valid = 1;
+        for (i = 1; i <= length(str); i++) {
+            c = substr(str, i, 1);
+            if ((c >= "0" && c <= "9") || c == ".") {
+                if (c == "." && num ~ /\./) {
+                    valid = 0;
+                    break;
+                }
+                num = num c;
+            } else if (c ~ /[smhdy]/) {
+                if (num != "") {
+                    val = num + 0;
+                    if (c == "s") mult = 1;
+                    else if (c == "m") mult = 60;
+                    else if (c == "h") mult = 3600;
+                    else if (c == "d") mult = 86400;
+                    else if (c == "y") mult = 31536000;
+                    total += val * mult;
+                    num = "";
+                } else {
+                    valid = 0;
+                    break;
+                }
+            } else {
+                valid = 0;
+                break;
+            }
+        }
+        if (num != "") {
+            total += (num + 0);
+        }
+        if (valid == 0 || total <= 0 || total > 3153600000) {
+            print "INVALID"
+        } else {
+            printf "%d", total;
+        }
+    }'
+}
+
+if [ "$#" -gt 0 ]; then
+    HAS_ARGS=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -silent)
+                SILENT=1
+                shift
+                ;;
+            -assist)
+                ASSIST=1
+                shift
+                ;;
+            -list)
+                LIST=1
+                # Capture the next parameter as SORT if it exists and is not another flag
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    SORT="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            -pass)
+                # Capture the next parameter as PASS_DEST if it exists and is not another flag;
+                # when missing, auto-select the first indexed session (per the styled help)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    PASS_DEST="$2"
+                    shift 2
+                else
+                    PASS_FIRST=1
+                    shift
+                fi
+                ;;
+            --pass)
+                # Strict variant: a destination argument is required
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    PASS_DEST="$2"
+                    shift 2
+                else
+                    [ "$SILENT" -ne 1 ] && {
+                        bp_error
+                        printf -- "${ULINE}${YELLOW}--pass${RESET} ${CYAN}requires${RESET} a ${YELLOW}destination argument${RESET}\n"
+                        printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                    }
+                    exit 1
+                fi
+                ;;
+            -location)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    LOCATION="$2"
+                    STRICT_LOC=0
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --location)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    LOCATION="$2"
+                    STRICT_LOC=1
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            -audit)
+                AUDIT_MODE="clean"
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    AUDIT_PATH="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --audit)
+                AUDIT_MODE="raw"
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    AUDIT_PATH="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            -wanted)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    WANTED_STR="$2"
+                    if [[ -n "$3" && "$3" != -* ]]; then
+                        WANTED_CMD="$3"
+                        shift 3
+                        # Join any further non-flag words into the command
+                        while [[ -n "$1" && "$1" != -* ]]; do
+                            WANTED_CMD+=" $1"
+                            shift
+                        done
+                    else
+                        shift 2
+                    fi
+                else
+                    bp_error
+                    printf -- "${ULINE}${YELLOW}-wanted${RESET} ${CYAN}requires${RESET} a ${YELLOW}search string${RESET}\n"
+                    printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                    exit 1
+                fi
+                ;;
+            -only)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    ONLY_CMD="$2"
+                    shift 2
+                    # Join any further non-flag words into the command
+                    while [[ -n "$1" && "$1" != -* ]]; do
+                        ONLY_CMD+=" $1"
+                        shift
+                    done
+                else
+                    [ "$SILENT" -ne 1 ] && {
+                        bp_error
+                        printf -- "${ULINE}${YELLOW}-only${RESET} ${CYAN}requires${RESET} a ${YELLOW}command argument${RESET}\n"
+                        printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                    }
+                    exit 1
+                fi
+                ;;
+            -first)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    FIRST_CMD="$2"
+                    shift 2
+                    # Join any further non-flag words into the command
+                    while [[ -n "$1" && "$1" != -* ]]; do
+                        FIRST_CMD+=" $1"
+                        shift
+                    done
+                else
+                    shift
+                fi
+                ;;
+            -last)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    LAST_CMD="$2"
+                    shift 2
+                    # Join any further non-flag words into the command
+                    while [[ -n "$1" && "$1" != -* ]]; do
+                        LAST_CMD+=" $1"
+                        shift
+                    done
+                else
+                    shift
+                fi
+                ;;
+            --timer)
+                # Repeatable: each --timer [TIME] [TIMEXEC] adds one timer that
+                # warns and executes [TIMEXEC] on expiry without disconnecting
+                TIMEXEC_TIME_RAW=""
+                TIMEXEC_CMD=""
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    TIMEXEC_TIME_RAW="$2"
+                    shift 2
+                    # Optional [TIMEXEC]: join any further non-flag words
+                    while [[ -n "$1" && "$1" != -* ]]; do
+                        TIMEXEC_CMD+="${TIMEXEC_CMD:+ }$1"
+                        shift
+                    done
+                fi
+                if [ -n "$TIMEXEC_TIME_RAW" ]; then
+                    TT_SECS=$(parse_time "$TIMEXEC_TIME_RAW")
+                    if [ "$TT_SECS" == "INVALID" ]; then
+                        bp_error
+                        printf "${ULINE}${YELLOW}$TIMEXEC_TIME_RAW${RESET} is an ${RED}invalid${RESET} ${YELLOW}time format${RESET}\n"
+                        printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                        exit 1
+                    fi
+                    TIMEXEC_SECS+=("$TT_SECS")
+                    TIMEXEC_CMDS+=("$TIMEXEC_CMD")
+                else
+                    bp_error
+                    printf -- "${ULINE}${YELLOW}--timer${RESET} ${CYAN}requires${RESET} a ${YELLOW}defined time value${RESET}\n"
+                    printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                    exit 1
+                fi
+                ;;
+            -timer*)
+                TIMER_RAW=""
+                WARNTIME_RAW=""
+                if [[ "$1" == "-timer" ]]; then
+                    if [[ -n "$2" && "$2" != -* ]]; then
+                        TIMER_RAW="$2"
+                        shift 2
+                        # Optional [WARNTIME]: a second argument, when present
+                        if [[ -n "$1" && "$1" != -* ]]; then
+                            WARNTIME_RAW="$1"
+                            shift 1
+                            # Optional [WARNEXEC]: a third argument, when present —
+                            # join any further non-flag words into the command
+                            while [[ -n "$1" && "$1" != -* ]]; do
+                                WARNEXEC+="${WARNEXEC:+ }$1"
+                                shift
+                            done
+                        fi
+                    else
+                        shift
+                    fi
+                else
+                    TIMER_RAW="${1#-timer}"
+                    shift
+                fi
+                
+                if [ -n "$TIMER_RAW" ]; then
+                    TIMER=$(parse_time "$TIMER_RAW")
+                    
+                    if [ "$TIMER" == "INVALID" ]; then
+                        bp_error
+                        printf "${ULINE}${YELLOW}$TIMER_RAW${RESET} is an ${RED}invalid${RESET} ${YELLOW}time format${RESET}\n"
+                        printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                        exit 1
+                    fi
+                    
+                    if [ -n "$WARNTIME_RAW" ]; then
+                        WARNTIME=$(parse_time "$WARNTIME_RAW")
+                        
+                        if [ "$WARNTIME" == "INVALID" ]; then
+                            bp_error
+                            printf "${ULINE}${YELLOW}$WARNTIME_RAW${RESET} is an ${RED}invalid${RESET} ${YELLOW}time format${RESET}\n"
+                            printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                            exit 1
+                        fi
+                        
+                        if [ "$WARNTIME" -ge "$TIMER" ]; then
+                            bp_error
+                            printf -- "${CYAN}Warning-time${RESET} of ${BRIGHT_BLUE}$WARNTIME_RAW${RESET} ${RED}is ${ULINE}not${RESET} ${RED}within${RESET} ${YELLOW}range of timer:${RESET} ${BRIGHT_BLUE}$TIMER_RAW${RESET}\n"
+                            printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                            exit 1
+                        fi
+                    fi
+                else
+                    bp_error
+                    printf -- "${ULINE}${YELLOW}-timer${RESET} ${CYAN}requires${RESET} a ${YELLOW}defined time value${RESET}\n"
+                    printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                    exit 1
+                fi
+                ;;
+            -help|-h|--help)
+                # Styled help lives in bash-pass-help (same directory); it
+                # defines its own style variables and also runs standalone.
+                source "$(dirname "$0")/bash-pass-help"
+                exit 0
+                ;;
+            -version|--version)
+                printf "${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${GREEN}installed${RESET} ${CYAN}version${RESET}: ${BRIGHT_BLUE}${VERSION}${RESET}\n"
+                exit 0
+                ;;
+            *)
+                bp_error
+                printf -- "${ULINE}${YELLOW}$1${RESET} is ${BRIGHT_RED}not${RESET} a ${GREEN}valid${RESET} ${YELLOW}argument${RESET}\n"
+                printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                exit 1
+                ;;
+        esac
+    done
+fi
+
+if [ -n "$ONLY_CMD" ]; then
+    if [ -n "$FIRST_CMD" ] || [ -n "$LAST_CMD" ]; then
+        [ "$SILENT" -ne 1 ] && {
+            bp_error
+            printf -- "${ULINE}${YELLOW}-only${RESET} ${BRIGHT_RED}cannot${RESET} be used ${CYAN}simultaneously${RESET} with ${ULINE}${YELLOW}-first${RESET} or ${ULINE}${YELLOW}-last${RESET}\n"
+            printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+        }
+        exit 1
+    fi
+fi
+
+if [ "$ASSIST" -eq 1 ]; then
+    if ! command -v dialog >/dev/null 2>&1; then
+        [ "$SILENT" -ne 1 ] && {
+            bp_error
+            printf -- "${ULINE}${YELLOW}-assist${RESET} ${RED}requires${RESET} the ${ULINE}${CYAN}dialog utility${RESET} to ${GREEN}run${RESET}\n"
+            printf "${CYAN}Install${RESET} the ${ULINE}${YELLOW}dialog package${RESET} to ${CYAN}use${RESET} this ${YELLOW}argument${RESET}\n"
+            printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+        }
+        exit 1
+    fi
+fi
+
+if [ "$EUID" -ne 0 ]; then
+    [ "$SILENT" -ne 1 ] && {
+        bp_error
+        printf "${ULINE}${YELLOW}root privilege${RESET} is ${RED}required${RESET} (${CYAN}${ULINE}run with sudo${RESET})\n"
+    }
+    exit 1
+fi
+
+# Process Scanner
+CPID=$$
+ANCESTORS=" "
+while [ -n "$CPID" ] && [ "$CPID" -gt 1 ]; do
+    CPID=$(awk '{print $4}' "/proc/$CPID/stat" 2>/dev/null)
+    [ -n "$CPID" ] && ANCESTORS+="$CPID "
+done
+
+declare -a USERS TYPES TTYS LDRS PRINT_TYPES
+IDX=1
+
+# Session Details
+for SID in $(loginctl list-sessions --no-legend | awk '{print $1}'); do
+    TYPE=$(loginctl show-session "$SID" -p Type | awk -F= '{print $2}')
+    [ "$TYPE" == "unspecified" ] && continue
+    
+    LEADER=$(loginctl show-session "$SID" -p Leader | awk -F= '{print $2}')
+    [ -n "$LEADER" ] && [[ "$ANCESTORS" == *" $LEADER "* ]] && continue
+    
+    USER=$(loginctl show-session "$SID" -p Name | awk -F= '{print $2}')
+    S_TTY=$(loginctl show-session "$SID" -p TTY | awk -F= '{print $2}')
+    [ -z "$USER" ] && continue
+    
+    # Assimilate the TTY-to-IP mapping
+    PRINT_TYPE="$TYPE"
+    # Tag graphical sessions as "<type> display" so -pass/-list can target them with "display"
+    if [ "$TYPE" == "wayland" ] || [ "$TYPE" == "x11" ]; then
+        PRINT_TYPE="$TYPE display"
+    fi
+    if [ -n "$S_TTY" ]; then
+        WHO_IP=$(who | awk -v t="$S_TTY" '$2 == t {print $5}' 2>/dev/null)
+        [ -n "$WHO_IP" ] && PRINT_TYPE="$PRINT_TYPE $WHO_IP"
+    fi
+    
+    USERS[$IDX]=$USER
+    TYPES[$IDX]=$TYPE 
+    TTYS[$IDX]=$S_TTY
+    LDRS[$IDX]=$LEADER
+    PRINT_TYPES[$IDX]=$PRINT_TYPE
+    
+    ((IDX++))
+done
+
+# Environment Check
+TARGET_COUNT=${#USERS[@]}
+
+if [ "$TARGET_COUNT" -eq 0 ]; then
+    [ "$SILENT" -ne 1 ] && {
+        bp_error
+        printf "${RED}failed${RESET} to ${CYAN}find${RESET} a ${GREEN}session${RESET}\n"
+    }
+    exit 1
+elif [ "$TARGET_COUNT" -eq 1 ] && [ "$LIST" -eq 0 ] && [ -z "$SORT" ] && [ -z "$PASS_DEST" ]; then
+    SEL=$(echo "${!USERS[@]}")
+    [ "$SILENT" -ne 1 ] && {
+        clear
+        bp_title
+        printf "${BRIGHT_BLUE}Singular${RESET} ${ULINE}${GREEN}session${RESET} ${CYAN}identified${RESET}\n"
+        sleep 0.5
+        bp_assign
+        sleep 0.5
+    }
+else
+    if [ -n "$PASS_DEST" ] || [ "$PASS_FIRST" -eq 1 ]; then
+        if [ "$PASS_FIRST" -eq 1 ]; then
+            SEL=1
+        elif [ "$PASS_DEST" == "oldest" ]; then
+            SEL=1
+        elif [ "$PASS_DEST" == "latest" ]; then
+            SEL=$TARGET_COUNT
+        else
+            # Exact matches first (so a numeric uid like "0" matches the exact uid,
+            # not the first substring hit such as "1000"), then substring matches.
+            for i in "${!USERS[@]}"; do
+                T_UID=$(id -u "${USERS[$i]}" 2>/dev/null)
+                T_TTY="${TTYS[$i]:-Headless}"
+                T_TYPE="${PRINT_TYPES[$i]}"
+                T_USER="${USERS[$i]}"
+                if [[ "$T_USER" == "$PASS_DEST" ]] || [[ "$T_UID" == "$PASS_DEST" ]] || [[ "$T_TTY" == "$PASS_DEST" ]] || [[ "$T_TYPE" == "$PASS_DEST" ]]; then
+                    SEL=$i
+                    break
+                fi
+            done
+            if [ -z "$SEL" ]; then
+                for i in "${!USERS[@]}"; do
+                    T_UID=$(id -u "${USERS[$i]}" 2>/dev/null)
+                    T_TTY="${TTYS[$i]:-Headless}"
+                    T_TYPE="${PRINT_TYPES[$i]}"
+                    T_USER="${USERS[$i]}"
+                    if [[ "$T_USER" == *"$PASS_DEST"* ]] || [[ "$T_UID" == *"$PASS_DEST"* ]] || [[ "$T_TTY" == *"$PASS_DEST"* ]] || [[ "$T_TYPE" == *"$PASS_DEST"* ]]; then
+                        SEL=$i
+                        break
+                    fi
+                done
+            fi
+        fi
+        
+        # Failsafe if the pass argument yielded zero matches
+        if [ -z "$SEL" ]; then
+            [ "$SILENT" -ne 1 ] && {
+                bp_error
+                printf "${RED}No results${RESET} ${CYAN}found${RESET} for ${ULINE}${YELLOW}$PASS_DEST${RESET}\n"
+            }
+            exit 1
+        fi
+        
+        [ "$SILENT" -ne 1 ] && {
+            clear
+            bp_title
+            printf "${YELLOW}Targeted${RESET} ${ULINE}${GREEN}session${RESET} ${CYAN}identified${RESET}\n"
+            sleep 0.5
+            bp_assign
+            sleep 0.5
+        }
+    else
+        # Pre-calculate sort matches to determine if the table should be drawn
+        if [ -n "$SORT" ]; then
+            MATCH_COUNT=0
+            for i in "${!USERS[@]}"; do
+                T_UID=$(id -u "${USERS[$i]}" 2>/dev/null)
+                T_TTY="${TTYS[$i]:-Headless}"
+                T_TYPE="${PRINT_TYPES[$i]}"
+                T_USER="${USERS[$i]}"
+                
+                if [[ "$T_USER" == *"$SORT"* ]] || [[ "$T_UID" == *"$SORT"* ]] || [[ "$T_TTY" == *"$SORT"* ]] || [[ "$T_TYPE" == *"$SORT"* ]]; then
+                    ((MATCH_COUNT++))
+                fi
+            done
+            
+            if [ "$MATCH_COUNT" -eq 0 ]; then
+                [ "$SILENT" -ne 1 ] && {
+                    bp_error
+                    printf "${RED}No results${RESET} ${CYAN}found${RESET} for ${ULINE}${YELLOW}${SORT}${RESET}\n"
+                }
+                exit 0
+            fi
+        fi
+
+        clear
+        if [ "$ASSIST" -eq 1 ] && [ "$LIST" -eq 0 ]; then
+            # -assist: render the selection as a dialog menu instead of the table
+            ITEMS=()
+            if [ -z "$SORT" ]; then
+                for i in "${!USERS[@]}"; do
+                    T_UID=$(id -u "${USERS[$i]}" 2>/dev/null)
+                    ITEMS+=("$i" "${USERS[$i]} | $T_UID | ${TTYS[$i]:-Headless} | ${PRINT_TYPES[$i]}")
+                done
+            else
+                for i in "${!USERS[@]}"; do
+                    T_UID=$(id -u "${USERS[$i]}" 2>/dev/null)
+                    T_TTY="${TTYS[$i]:-Headless}"
+                    T_TYPE="${PRINT_TYPES[$i]}"
+                    T_USER="${USERS[$i]}"
+                    
+                    # Include row only if SORT string is found in at least one column
+                    if [[ "$T_USER" == *"$SORT"* ]] || [[ "$T_UID" == *"$SORT"* ]] || [[ "$T_TTY" == *"$SORT"* ]] || [[ "$T_TYPE" == *"$SORT"* ]]; then
+                        ITEMS+=("$i" "$T_USER | $T_UID | $T_TTY | $T_TYPE")
+                    fi
+                done
+            fi
+            exec 3>&1
+            SEL=$(dialog --clear  --backtitle "Bash Pass" --title "Identified Sessions" --menu "Select the desired session to create a pass:" 0 0 0 "${ITEMS[@]}" 2>&1 1>&3)
+            DRC=$?
+            exec 3>&-
+            if [ "$DRC" -ne 0 ]; then
+                # Cancel/ESC: dialog leaves its screen behind — reset the
+                # terminal attributes and repaint before exiting
+                tput sgr0 2>/dev/null
+                tput cnorm 2>/dev/null
+                clear
+                exit 1
+            fi
+        else
+        printf "${BOLD}│${RESET} ${BLUE}${BOLD}NUM${RESET} | ${GREEN}${BOLD}USER${RESET} | ${YELLOW}${BOLD}UID${RESET} | ${CYAN}${BOLD}TTY${RESET} | ${YELLOW}${BOLD}TYPE${RESET} ${BOLD}│${RESET}\n"
+        printf "${BOLD}├───────────────────────────────┘${RESET}\n"
+        
+        if [ -z "$SORT" ]; then
+            for i in "${!USERS[@]}"; do
+                T_UID=$(id -u "${USERS[$i]}" 2>/dev/null)
+                printf "${BOLD}│${RESET} ${BLUE}${BOLD}%d)${RESET} ${GREEN}%s${RESET} | ${YELLOW}%s${RESET} | ${CYAN}%s${RESET} | ${YELLOW}%s${RESET}\n" "$i" "${USERS[$i]}" "$T_UID" "${TTYS[$i]:-Headless}" "${PRINT_TYPES[$i]}"
+            done
+        else
+            for i in "${!USERS[@]}"; do
+                T_UID=$(id -u "${USERS[$i]}" 2>/dev/null)
+                T_TTY="${TTYS[$i]:-Headless}"
+                T_TYPE="${PRINT_TYPES[$i]}"
+                T_USER="${USERS[$i]}"
+                
+                # Print row only if SORT string is found in at least one column
+                if [[ "$T_USER" == *"$SORT"* ]] || [[ "$T_UID" == *"$SORT"* ]] || [[ "$T_TTY" == *"$SORT"* ]] || [[ "$T_TYPE" == *"$SORT"* ]]; then
+                    printf "${BOLD}│${RESET} ${BLUE}${BOLD}%d)${RESET} ${GREEN}%s${RESET} | ${YELLOW}%s${RESET} | ${CYAN}%s${RESET} | ${YELLOW}%s${RESET}\n" "$i" "$T_USER" "$T_UID" "$T_TTY" "$T_TYPE"
+                fi
+            done
+        fi
+        
+        printf "${BOLD}└────────────────────────────────${RESET}\n"
+        
+        if [ "$LIST" -eq 1 ]; then
+            exit 0
+        fi
+        
+        [ "$SILENT" -ne 1 ] && printf "${CYAN}Select${RESET} the ${ULINE}${GREEN}desired session${RESET} by ${BRIGHT_BLUE}number${RESET} to ${YELLOW}create${RESET} a ${BRIGHT_GREEN}pass${RESET}\n"
+        read -r -p "> " SEL
+        fi
+        
+        if [[ ! "$SEL" =~ ^[0-9]+$ ]] || [ -z "${USERS[$SEL]}" ]; then
+            [ "$SILENT" -ne 1 ] && {
+                bp_error
+                printf "${YELLOW}${SEL}${RESET} ${RED}is not within${RESET} ${CYAN}available range${RESET}: ${BRIGHT_BLUE}1-${#USERS[@]}${RESET}\n"
+            }
+            exit 1
+        fi
+    fi
+fi
+
+# Process Location
+if [ -n "$LOCATION" ]; then
+    if [ ! -d "$LOCATION" ]; then
+        if [ "$STRICT_LOC" -eq 1 ]; then
+            [ "$SILENT" -ne 1 ] && {
+                bp_error
+                printf "${GREEN}Location${RESET} ${ULINE}${YELLOW}$LOCATION${RESET} does ${RED}${ULINE}not${RESET} ${RED}exist${RESET}\n"
+            }
+            exit 1
+        else
+            FAILED_LOC="$LOCATION"
+            LOC_FALLBACK=1
+            LOCATION=""
+        fi
+    fi
+fi
+
+# Grafting
+T_USER=${USERS[$SEL]}; TYPE=${TYPES[$SEL]}; TTY=${TTYS[$SEL]}; LEADER=${LDRS[$SEL]}
+
+if [[ "$TYPE" =~ wayland|x11 ]]; then
+    for pid in $(pgrep -u "$T_USER" 2>/dev/null); do
+        grep -q -z -E "^(WAYLAND_DISPLAY|DISPLAY)=" "/proc/$pid/environ" 2>/dev/null && { LEADER=$pid; break; }
+    done
+elif [[ -n "$TTY" ]]; then
+    TRUE_HOST=$(ps -t "$TTY" --sort=start_time -o pid= 2>/dev/null | head -n 1 | tr -d ' ')
+    [ -n "$TRUE_HOST" ] && LEADER=$TRUE_HOST
+    
+    for pid in $(ps -t "$TTY" -o pid= 2>/dev/null); do
+        grep -q -z -E "^(ARCAN_CONNPATH|TMUX|STY)=" "/proc/$pid/environ" 2>/dev/null && { LEADER=$pid; break; }
+    done
+fi
+
+# Audit & Wanted Configuration & Verification
+if [ -n "$AUDIT_MODE" ] || [ -n "$WANTED_STR" ]; then
+    if ! command -v script >/dev/null 2>&1; then
+        [ "$SILENT" -ne 1 ] && {
+            if [ -n "$WANTED_STR" ]; then
+                bp_error
+                printf -- "${ULINE}${YELLOW}-wanted${RESET} ${RED}requires${RESET} the ${ULINE}${CYAN}script utility${RESET} to ${GREEN}run${RESET}\n"
+                printf "${CYAN}Install${RESET} the ${ULINE}${YELLOW}util-linux package${RESET} to ${CYAN}use${RESET} this ${YELLOW}argument${RESET}\n"
+                printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+            fi
+            if [ -n "$AUDIT_MODE" ]; then
+                bp_error
+                printf -- "${ULINE}${YELLOW}-audit${RESET} ${RED}requires${RESET} the ${ULINE}${CYAN}script utility${RESET} to ${GREEN}run${RESET}\n"
+                printf "${CYAN}Install${RESET} the ${ULINE}${YELLOW}util-linux package${RESET} to ${CYAN}use${RESET} this ${YELLOW}argument${RESET}\n"
+                printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+            fi
+        }
+        exit 1
+    fi
+fi
+
+if [ -n "$AUDIT_MODE" ]; then
+    SUDO_RUNNER="${SUDO_USER:-root}"
+    SUDO_RUNNER_HOME=$(getent passwd "$SUDO_RUNNER" | cut -d: -f6)
+    [ -z "$SUDO_RUNNER_HOME" ] && SUDO_RUNNER_HOME="/home/${SUDO_RUNNER:-root}"
+    DATE_STR=$(date +"%SS%MM%HH—%d-%m-%Y")
+    DEFAULT_FILE_NAME="${SUDO_RUNNER}-${TYPE}_${DATE_STR}.txt"
+    DEFAULT_DIR="/tmp/bash-pass/audits"
+    DEFAULT_AUDIT_PATH="${DEFAULT_DIR}/${DEFAULT_FILE_NAME}"
+
+    if [ -z "$AUDIT_PATH" ]; then
+        AUDIT_PATH="$DEFAULT_AUDIT_PATH"
+    else
+        # Check if argument is strictly a file name without directory elements
+        if [[ ! "$AUDIT_PATH" == */* ]]; then
+            AUDIT_PATH="${DEFAULT_DIR}/${AUDIT_PATH}"
+        else
+            # Safely convert literal ~/ paths to the invoking user's actual home directory
+            # (the RHS must be quoted: an unquoted ~/* would tilde-expand to /root/* and
+            # never match a string starting with a literal ~)
+            if [[ "$AUDIT_PATH" == "~/"* ]]; then
+                AUDIT_PATH="${SUDO_RUNNER_HOME}/${AUDIT_PATH#\~/}"
+            elif [[ "$AUDIT_PATH" == "~" ]]; then
+                AUDIT_PATH="${SUDO_RUNNER_HOME}"
+            fi
+            
+            # Verify if the terminal node of the path defines a file extension
+            if [[ "${AUDIT_PATH}" == */ ]]; then
+                AUDIT_PATH="${AUDIT_PATH}${DEFAULT_FILE_NAME}"
+            elif [[ ! "${AUDIT_PATH##*/}" == *.* ]]; then
+                # Format as directory and map standard file name inside
+                AUDIT_PATH="${AUDIT_PATH%/}/${DEFAULT_FILE_NAME}"
+            fi
+        fi
+    fi
+
+    # Existence check to detect collisions and dynamically revert the file name while retaining the directory
+    if [ -e "$AUDIT_PATH" ]; then
+        AUDIT_NAME_CONFLICT=1
+        DESIRED_AUDIT_FILE="${AUDIT_PATH##*/}"
+        DESIRED_AUDIT_DIR=$(dirname "$AUDIT_PATH")
+        AUDIT_PATH="${DESIRED_AUDIT_DIR}/${DEFAULT_FILE_NAME}"
+    fi
+
+    # Attempt validation of output path
+    AUDIT_DIR=$(dirname "$AUDIT_PATH")
+    if ! mkdir -p "$AUDIT_DIR" 2>/dev/null || ! touch "$AUDIT_PATH" 2>/dev/null; then
+        AUDIT_FALLBACK=1
+        CUSTOM_AUDIT_PATH="$AUDIT_PATH"
+        AUDIT_PATH="$DEFAULT_AUDIT_PATH"
+        mkdir -p "$(dirname "$AUDIT_PATH")" 2>/dev/null
+        touch "$AUDIT_PATH" 2>/dev/null
+        # Refresh so the F3/[36] "defaulted to" text shows the real fallback destination
+        AUDIT_DIR=$(dirname "$AUDIT_PATH")
+    fi
+fi
+
+# Format variables for flavour text
+T_UID=$(id -u "$T_USER" 2>/dev/null)
+
+D_TTY="${TTY:-Headless}"
+[ "${#D_TTY}" -gt 12 ] && D_TTY="${D_TTY:0:9}..."
+D_UID="$T_UID"
+[ "${#D_UID}" -gt 22 ] && D_UID="${D_UID:0:19}..."
+D_USER="$T_USER"
+[ "${#D_USER}" -gt 17 ] && D_USER="${D_USER:0:14}..."
+D_TYPE="${PRINT_TYPES[$SEL]}"
+[ "${#D_TYPE}" -gt 17 ] && D_TYPE="${D_TYPE:0:14}..."
+
+# Payload initialization and configuration as an rcfile
+PAYLOAD=$(mktemp)
+
+# How the session shell is entered
+RUN_CMD="sudo -u \"$T_USER\" /bin/bash --rcfile \"$PAYLOAD\" -i"
+
+# Global Cleanup Handler
+cleanup_daemons() {
+    if [ -n "$WATCHDOG_PID" ]; then
+        kill "$WATCHDOG_PID" 2>/dev/null
+        pkill -P "$WATCHDOG_PID" 2>/dev/null
+    fi
+    if [ -n "$WANTED_PID" ]; then
+        kill "$WANTED_PID" 2>/dev/null
+        pkill -P "$WANTED_PID" 2>/dev/null
+    fi
+    if [ -f "$PAYLOAD" ]; then
+        rm -f "$PAYLOAD"
+    fi
+}
+trap cleanup_daemons EXIT SIGINT SIGTERM SIGHUP SIGQUIT
+
+# Kill function to gracefully and forcefully terminate the session and all wrappers
+kill_payload() {
+    local B_PID
+    B_PID=$(pgrep -f "bash --rcfile $PAYLOAD" 2>/dev/null | head -n 1)
+    
+    if [ -n "$B_PID" ]; then
+        kill -USR1 "$B_PID" 2>/dev/null
+    fi
+    pkill -USR1 -P $$ -x script 2>/dev/null
+    pkill -USR1 -P $$ -x sudo 2>/dev/null
+    
+    sleep 0.1
+    
+    if [ -n "$B_PID" ]; then
+        kill -INT "$B_PID" 2>/dev/null
+    fi
+    pkill -INT -P $$ -x script 2>/dev/null
+    pkill -INT -P $$ -x sudo 2>/dev/null
+    
+    sleep 0.2
+    
+    if [ -n "$B_PID" ]; then
+        kill -HUP "$B_PID" 2>/dev/null
+    fi
+    pkill -HUP -P $$ -x script 2>/dev/null
+    pkill -HUP -P $$ -x sudo 2>/dev/null
+    
+    # Final Failsafe: Aggressive cleanup for daemonized ptys (e.g. GUI apps blocking EOF)
+    sleep 0.5
+    if [ -n "$B_PID" ]; then
+        kill -9 "$B_PID" 2>/dev/null
+    fi
+    pkill -9 -P $$ -x script 2>/dev/null
+    pkill -9 -P $$ -x sudo 2>/dev/null
+}
+
+echo "[ -f ~/.bashrc ] && source ~/.bashrc" > "$PAYLOAD"
+echo "stty -echoctl" >> "$PAYLOAD"  # Hide that ^C
+
+while IFS= read -r -d '' var; do
+    V_NAME="${var%%=*}"
+    # Proceed only if the variable name is valid and NOT in the read-only exclusion list
+    if [[ "$V_NAME" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] && [[ ! "$V_NAME" =~ ^(UID|EUID|PPID|SHELLOPTS|BASHOPTS)$ ]]; then
+        # Never graft terminal-identity variables from the target session — see TERM_IDENTITY above
+        for TV in "${TERM_IDENTITY_NAMES[@]}"; do
+            [ "$V_NAME" == "$TV" ] && continue 2
+        done
+        printf "export %s=%q\n" "$V_NAME" "${var#*=}" >> "$PAYLOAD"
+    fi
+done < "/proc/$LEADER/environ" 2>/dev/null || true
+
+# Re-assert the caller's terminal identity so TUI colours pass through to the client
+for pair in "${TERM_IDENTITY[@]}"; do
+    printf "export %s=%q\n" "${pair%%=*}" "${pair#*=}" >> "$PAYLOAD"
+done
+# Sane fallback for clients that send no TERM at all
+[ -z "$TERM" ] && echo "export TERM=xterm-256color" >> "$PAYLOAD"
+
+# Inject the clean exit trap and session prompt
+echo "trap 'exit 0' SIGUSR1" >> "$PAYLOAD"
+
+if [ -n "$LAST_CMD" ]; then
+    # Detached: the trap double-forks the command so it outlives the session
+    echo "trap $(printf '%q' "( $LAST_CMD </dev/null & )") EXIT" >> "$PAYLOAD"
+fi
+
+# Suppress the hardcoded interactive exit prints for both the command and Ctrl+D
+echo "alias exit='builtin exit 2>/dev/null'" >> "$PAYLOAD"
+echo "bind '\"\\C-d\":\"builtin exit 2>/dev/null\\n\"'" >> "$PAYLOAD"
+
+# Use double quotes to evaluate the parent's color variables into literal escape codes in the payload file
+# The card (below) prints the Accepted header and possibly a Notice header before the
+# session starts; the session shell cannot inherit the exported BP_* flags (sudo's
+# env_reset strips them), so record the card's already-shown state in the payload itself.
+if [ "$SILENT" -ne 1 ]; then
+    echo "export BP_ACCEPTED_SHOWN=1" >> "$PAYLOAD"
+    if [ "$AUDIT_FALLBACK" -eq 1 ] && [ "$AUDIT_NAME_CONFLICT" -ne 1 ]; then
+        echo "export BP_NOTICE_SHOWN=1" >> "$PAYLOAD"
+    fi
+fi
+[ "$SILENT" -ne 1 ] && echo "if [ \"\$BP_ACCEPTED_SHOWN\" != \"1\" ]; then echo -e '${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${GREEN}${BOLD}Accepted${RESET}'; export BP_ACCEPTED_SHOWN=1; fi" >> "$PAYLOAD"
+[ "$SILENT" -ne 1 ] && echo "echo -e '${BRIGHT_GREEN}Pass${RESET} ${GREEN}accepted${RESET} for ${ULINE}${YELLOW}$D_USER${RESET}'" >> "$PAYLOAD"
+
+if [ "$LOC_FALLBACK" -eq 1 ] && [ "$SILENT" -ne 1 ]; then
+    echo "if [ \"\$BP_NOTICE_SHOWN\" != \"1\" ]; then echo -e '${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Notice${RESET}'; export BP_NOTICE_SHOWN=1; fi" >> "$PAYLOAD"
+    echo "echo -e '${GREEN}Location${RESET} ${ULINE}${YELLOW}$(sq "$FAILED_LOC")${RESET} ${RED}${ULINE}not${RESET} ${RED}found${RESET}, ${CYAN}defaulted${RESET} to ${GREEN}'\"\$PWD\"'${RESET}'" >> "$PAYLOAD"
+fi
+
+if [ "$AUDIT_NAME_CONFLICT" -eq 1 ] && [ "$AUDIT_FALLBACK" -eq 1 ] && [ "$SILENT" -ne 1 ]; then
+    echo "if [ \"\$BP_NOTICE_SHOWN\" != \"1\" ]; then echo -e '${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Notice${RESET}'; export BP_NOTICE_SHOWN=1; fi" >> "$PAYLOAD"
+    echo "echo -e '${GREEN}Location${RESET} ${ULINE}${YELLOW}$(sq "$CUSTOM_AUDIT_PATH")${RESET} ${RED}is ${ULINE}not${RESET} ${RED}accessible${RESET}, ${CYAN}defaulting${RESET} ${CYAN}filepath${RESET} to ${GREEN}'\"$AUDIT_DIR\"'${RESET}'" >> "$PAYLOAD"
+    echo "echo -e '${RED}${ULINE}Unable${RESET} ${RED}to write${RESET} ${YELLOW}$(sq "$DESIRED_AUDIT_FILE")${RESET} at ${ULINE}${YELLOW}$(sq "$DESIRED_AUDIT_DIR")${RESET}, ${CYAN}defaulting${RESET} ${CYAN}filename${RESET} to ${GREEN}${DEFAULT_FILE_NAME}${RESET}'" >> "$PAYLOAD"
+elif [ "$AUDIT_NAME_CONFLICT" -eq 1 ] && [ "$SILENT" -ne 1 ]; then
+    echo "if [ \"\$BP_NOTICE_SHOWN\" != \"1\" ]; then echo -e '${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Notice${RESET}'; export BP_NOTICE_SHOWN=1; fi" >> "$PAYLOAD"
+    echo "echo -e '${RED}${ULINE}Unable${RESET} ${RED}to write${RESET} ${YELLOW}$(sq "$DESIRED_AUDIT_FILE")${RESET} at ${ULINE}${YELLOW}$(sq "$DESIRED_AUDIT_DIR")${RESET}, ${CYAN}defaulting${RESET} ${CYAN}filename${RESET} to ${GREEN}${DEFAULT_FILE_NAME}${RESET}'" >> "$PAYLOAD"
+fi
+
+if [ -n "$TIMER" ] && [ "$SILENT" -ne 1 ]; then
+    echo "if [ \"\$BP_NOTICE_SHOWN\" != \"1\" ]; then echo -e '${GREEN}${ULINE}${BOLD}Bash Pass${RESET} ${YELLOW}${BOLD}Notice${RESET}'; export BP_NOTICE_SHOWN=1; fi" >> "$PAYLOAD"
+    if [ -n "$WARNTIME" ]; then
+        echo "echo -e 'This is a ${CYAN}timed${RESET} ${BRIGHT_BLUE}session${RESET}. ${YELLOW}Timer length:${RESET} ${ULINE}${BRIGHT_BLUE}$(fmt_duration "$TIMER")${RESET}. ${YELLOW}Warning at:${RESET} ${ULINE}${BRIGHT_BLUE}$(fmt_duration "$WARNTIME")${RESET}'" >> "$PAYLOAD"
+    else
+        echo "echo -e 'This is a ${CYAN}timed${RESET} ${BRIGHT_BLUE}session${RESET}. ${YELLOW}Timer length:${RESET} ${ULINE}${BRIGHT_BLUE}$(fmt_duration "$TIMER")${RESET}'" >> "$PAYLOAD"
+    fi
+fi
+
+if [ -n "$LOCATION" ]; then
+    echo "cd $(printf "%q" "$LOCATION") 2>/dev/null" >> "$PAYLOAD"
+fi
+
+if [ -n "$FIRST_CMD" ]; then
+    # Detached: runs in the background of the session shell and outlives it
+    echo "( $FIRST_CMD </dev/null & )" >> "$PAYLOAD"
+fi
+
+if [ -n "$ONLY_CMD" ]; then
+    echo "( $ONLY_CMD </dev/null & )" >> "$PAYLOAD"
+    echo "builtin exit 0" >> "$PAYLOAD"
+fi
+
+chown "$T_USER" "$PAYLOAD"
+chmod 600 "$PAYLOAD"
+
+# Flavour Text
+# The Synthesized UI Matrix
+[ "$SILENT" -ne 1 ] && {
+    clear
+    printf "Your ${BRIGHT_GREEN}Pass${RESET} ${CYAN}has been${RESET} ${GREEN}crafted${RESET}:\n\n"
+    printf "${BOLD}╭───────────────────────╮${RESET}\n"
+    printf "${BOLD}│${RESET} ${GREEN}${BOLD}Bash Pass${RESET} ${BOLD}${CYAN}%12s${RESET}${BOLD}│${RESET}\n" "$D_TTY"
+    printf "${BOLD}│${RESET}${YELLOW}${BOLD}%23s${RESET}${BOLD}│${RESET}\n" "$D_UID"
+    printf "${BOLD}│${RESET}%23s${BOLD}│${RESET}\n" ""
+    printf "${BOLD}│${RESET}${BOLD}User: ${ULINE}${GREEN}%-17s${RESET}${BOLD}│${RESET}\n" "$D_USER"
+    printf "${BOLD}│${RESET}${BOLD}Env:  ${ULINE}${YELLOW}%-17s${RESET}${BOLD}│${RESET}\n" "$D_TYPE"
+    printf "${BOLD}╰───────────────────────╯${RESET}\n"
+    
+    if [ "$AUDIT_FALLBACK" -eq 1 ] && [ "$AUDIT_NAME_CONFLICT" -ne 1 ]; then
+        bp_notice
+        printf "${GREEN}Location${RESET} ${ULINE}${YELLOW}${CUSTOM_AUDIT_PATH}${RESET} ${RED}is ${ULINE}not${RESET} ${RED}accessible${RESET}, ${CYAN}defaulting${RESET} ${CYAN}filepath${RESET} to ${GREEN}'$AUDIT_DIR'${RESET}\n"
+    fi
+
+    sleep 0.5
+    printf "\n${CYAN}Presenting${RESET} ${BRIGHT_GREEN}pass${RESET} to ${GREEN}system..${RESET}${YELLOW}${BLINK}.${RESET}\n"
+    sleep 3
+
+    bp_accepted
+    sleep 0.5
+    clear
+}
+
+# Monitor the leader process and timer threshold
+(
+    ELAPSED=0
+    TERMINATED_BY_TIMER=0
+    TIMEXEC_FIRED=()
+    while kill -0 "$LEADER" 2>/dev/null; do
+        if [ -n "$WARNTIME" ] && [ "$WARNED" -eq 0 ] && [ "$ELAPSED" -ge "$WARNTIME" ]; then
+            [ "$SILENT" -ne 1 ] && warn_expired "$WARNTIME" "$((TIMER-WARNTIME))"
+            # [WARNEXEC] runs when the warning fires — also under -silent
+            [ -n "$WARNEXEC" ] && eval "$WARNEXEC"
+            WARNED=1
+        fi
+        # Repeatable --timer entries: warn + exec once each, never disconnect
+        for ((i=0; i<${#TIMEXEC_SECS[@]}; i++)); do
+            if [ "${TIMEXEC_FIRED[$i]:-0}" -eq 0 ] && [ "$ELAPSED" -ge "${TIMEXEC_SECS[$i]}" ]; then
+                TIMEXEC_FIRED[$i]=1
+                TT_REM=""
+                [ -n "$TIMER" ] && TT_REM=$((TIMER-${TIMEXEC_SECS[$i]}))
+                [ "$SILENT" -ne 1 ] && warn_expired "${TIMEXEC_SECS[$i]}" "$TT_REM"
+                [ -n "${TIMEXEC_CMDS[$i]}" ] && eval "${TIMEXEC_CMDS[$i]}"
+            fi
+        done
+        if [ -n "$TIMER" ]; then
+            if [ "$ELAPSED" -ge "$TIMER" ]; then
+                TERMINATED_BY_TIMER=1
+                break
+            fi
+        fi
+        sleep 1
+        ((ELAPSED+=1))
+    done
+    
+    [ "$SILENT" -ne 1 ] && {
+        bp_timer_end
+        if [ "$TERMINATED_BY_TIMER" -eq 1 ]; then
+            printf "Your ${YELLOW}timer${RESET} for ${ULINE}${BRIGHT_BLUE}$(fmt_duration "$TIMER")${RESET} has ${RED}expired${RESET}\r\n"
+        fi
+        printf "${YELLOW}Rescinding${RESET} your ${BRIGHT_GREEN}pass${RESET}\r\n"
+    }
+    
+    kill_payload
+    # No orphans: kill any exec still running in this subshell before exiting
+    pkill -P $$ 2>/dev/null
+) &
+WATCHDOG_PID=$!
+
+# Execute the shell with the payload with rcfile
+if [ -n "$AUDIT_MODE" ] || [ -n "$WANTED_STR" ]; then
+    RAW_AUDIT=$(mktemp)
+    
+    if [ -n "$WANTED_STR" ]; then
+        (
+            # Continuously monitor the session stream. Use unbuffered sed to strip ANSI escapes and resolve terminal backspaces.
+            tail -n +1 -f "$RAW_AUDIT" 2>/dev/null | \
+            sed -u -E -e 's/\x1B\][^\x07\x1B]*(\x07|\x1B\\)//g' \
+                      -e 's/\x1B\[[0-9;?]*[A-Za-z]//g' \
+                      -e 's/\x1B[()][A-Za-z]//g' \
+                      -e ':a' -e 's/[^\x08\x7F][\x08\x7F]//g' -e 't a' \
+                      -e 's/[\x08\x7F]//g' \
+                      -e 's/\r//g' | \
+            grep -q -m 1 -F "$WANTED_STR"
+            
+            if [ $? -eq 0 ]; then
+                # Delay slightly to allow the PTY to visually render the final keystroke
+                sleep 0.3
+                
+                if [ -n "$WANTED_CMD" ]; then
+                    [ "$SILENT" -ne 1 ] && {
+                        bp_wanted
+                        printf "${CYAN}Target${RESET} ${ULINE}${YELLOW}%s${RESET} has ${GREEN}appeared${RESET}\r\n" "$WANTED_STR"
+                        printf "${CYAN}Executing:${RESET} ${ULINE}${YELLOW}%s${RESET}\r\n" "$WANTED_CMD"
+                    }
+                    eval "$WANTED_CMD"
+                    # Return the caret to the session prompt (same as the timer warning)
+                    [ "$SILENT" -ne 1 ] && {
+                        B_PID=$(pgrep -f "bash --rcfile $PAYLOAD" 2>/dev/null | tail -n 1)
+                        [ -n "$B_PID" ] && kill -INT "$B_PID" 2>/dev/null
+                    }
+                else
+                    [ "$SILENT" -ne 1 ] && {
+                        bp_wanted
+                        printf "${CYAN}Target${RESET} ${ULINE}${YELLOW}%s${RESET} has ${GREEN}appeared${RESET}\r\n" "$WANTED_STR"
+                        printf "${YELLOW}Rescinding${RESET} your ${BRIGHT_GREEN}pass${RESET}\r\n"
+                    }
+                    kill_payload
+                fi
+            fi
+        ) &
+        WANTED_PID=$!
+    fi
+    
+    # Run the interactive bash wrapper internally via script, utilizing -f to flush stream outputs
+    script -q -f -e -c "$RUN_CMD" "$RAW_AUDIT"
+    
+    if [ -n "$WANTED_STR" ]; then
+        # Give the monitor time to finish printing if the marker appeared right
+        # at the end of the session (it sleeps 0.3s after a match before acting)
+        sleep 1
+        kill "$WANTED_PID" 2>/dev/null
+        pkill -P "$WANTED_PID" 2>/dev/null
+    fi
+    
+    # Write via a fresh file in the same directory and rename into place, so a
+    # symlink planted at the audit path is replaced, never followed (TOCTOU fix)
+    AUDIT_TMP=$(mktemp "$(dirname "$AUDIT_PATH")/.audit.XXXXXX" 2>/dev/null)
+    if [ -n "$AUDIT_TMP" ]; then
+        if [ "$AUDIT_MODE" == "clean" ]; then
+            # Strip OSC shell integration sequences and ANSI colors, retaining general output and exit codes
+            sed -E -e 's/\x1B\][^\x07\x1B]*(\x07|\x1B\\)//g' \
+                   -e 's/\x1B\[[0-9;?]*[A-Za-z]//g' \
+                   -e 's/\x1B[()][A-Za-z]//g' "$RAW_AUDIT" | \
+            col -b > "$AUDIT_TMP"
+        elif [ "$AUDIT_MODE" == "raw" ]; then
+            cat "$RAW_AUDIT" > "$AUDIT_TMP"
+        fi
+        mv -f "$AUDIT_TMP" "$AUDIT_PATH" 2>/dev/null
+    fi
+    
+    if [ -n "$AUDIT_MODE" ]; then
+        # Set appropriate ownership mapped to sudo issuer after writing is complete
+        chown "$SUDO_RUNNER" "$AUDIT_PATH" 2>/dev/null
+        chmod 644 "$AUDIT_PATH" 2>/dev/null
+    fi
+    
+    rm -f "$RAW_AUDIT"
+else
+    sudo -u "$T_USER" /bin/bash --rcfile "$PAYLOAD" -i
+fi
+
+[ "$SILENT" -ne 1 ] && {
+    bp_rescinded
+    printf "${GREEN}Successfully${RESET} ${RED}rescinded${RESET} your ${GREEN}pass${RESET}\r\n"
+    if [ -n "$AUDIT_MODE" ]; then
+        printf "${CYAN}Audit receipt${RESET} ${GREEN}saved${RESET} to: ${ULINE}${GREEN}%s${RESET}\r\n" "$AUDIT_PATH"
+    fi
+}
+
+exit 0
