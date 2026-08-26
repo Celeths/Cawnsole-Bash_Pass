@@ -1,2 +1,3 @@
-# Scratch/test files (see workspace TEST_FILES convention)
-TEST_FILES/
+# OS files
+.DS_Store
+Icon?
