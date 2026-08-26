@@ -22,33 +22,31 @@ When the target session ends, or the app is closed, all non-detached processes w
 
 ***Bash Pass is basically a back door to your system, use Bash Pass with care, don't be a dunce.***
 
-### Session Parasitizing
+##### Session Parasitizing
 
 **The moniker I made for what Bash Pass does is "session parasitizing".** Like a parasite, the app latches onto a host session and uses the host session's own credentials to burrow in and start asserting its will *(maybe a bit too personified of a description, but I think it gets the point across in a fun visual way)*.
 
 
-## Installation
+## Install & Run Bash Pass
 
-### Requirements
+#### Requirements
 
-| Required | |
-| --- | --- |
-| Linux host with systemd | |
-| Root access | |
+| Required |
+| --- |
+| Linux host with systemd |
+| Root access |
 
 | Semi-Required | Notes |
 | --- | --- |
 | `util-linux` (`script`) | required for `-audit` & `-wanted` arguments |
 | `dialog-utility` | required for '-assist' argument |
 
-### Install & Run Bash Pass
-
-## Installing Bash Pass
+### Installing Bash Pass
 
 1. Clone the repo, or download from releases
 2. Run the `install-bash-pass.sh` install script
 
-## Running Bash Pass
+### Running Bash Pass
 
 **There are two ways you can run Bash Pass assuming you installed it.**
 
