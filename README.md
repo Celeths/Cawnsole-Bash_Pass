@@ -1,6 +1,6 @@
 # Bash Pass
 
-<img src="./.assets/icon-full.png" width="75"/>
+<img src=".assets/Icon.png" width="75"/>
 
 Tunnel your terminal session into any other system session, allowing "session parasitizing".
 
@@ -16,7 +16,7 @@ Bash Pass allows a shell within the system to access other sessions and parasiti
 
 When the target session ends, or the app is closed, all non-detached processes will also be ended.
 
-<img src="./.assets/accept.png" width="350"/>
+<img src=".assets/accept.png" width="350"/>
 
 
 #### Session Parasitizing
@@ -50,9 +50,9 @@ When the target session ends, or the app is closed, all non-detached processes w
 
 Bash Pass can be used in a variety of ways due to its simple and flexible architecture. Simply running Bash Pass plainly is enough for most use cases, but that is the tip of the iceberg. Embedding Bash Pass into larger scripts, making full use of the available arguments, is where the real possibilities are. 
 
-<img src="./.assets/singular.png" width="350"/>
+<img src=".assets/singular.png" width="350"/>
 <br>
-<img src="./.assets/list.png" width="350"/>
+<img src=".assets/list.png" width="350"/>
 
 **Once installed, run Bash Pass with the `bashpass` command**. 
 
@@ -64,14 +64,14 @@ Bash Pass can be used in a variety of ways due to its simple and flexible archit
 
 Bash Pass is stylized as a friendly "pass" creation app, which then uses the created "pass" to access sessions (parasitize onto selected sessions). *This styling of the app extends to its argument names, terminology, and defaults.* 
 
-<img src="./.assets/pass.png" width="350"/>
+<img src=".assets/pass.png" width="350"/>
 
 1. Run Bash Pass **with sudo privilege** from any shell interface (including SSH)
 2. Select the desired session to parasitize
 3. Use the shell as if it was running locally in that session
 4. Type `exit` to detach from the session
 
-<img src="./.assets/rescinded.png" width="350"/>
+<img src=".assets/rescinded.png" width="350"/>
 
 ### Advanced Usage
 
