@@ -95,4 +95,4 @@ Bash Pass offers a wide variety of use cases by supporting a large number of arg
 | `-help` | Display the full option reference and exit. |
 | `-version` | Display the current version number. |
 
-*For a more detailed breakdown of how to use each argument (with examples), check the `WIKI.md`.*
+*For a more detailed breakdown of how to use each argument (with examples), check the [`WIKI.md`](WIKI.md).*
