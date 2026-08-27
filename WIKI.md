@@ -7,7 +7,7 @@ Bash Pass is a system tool for parasitizing active system sessions; it latches o
 
 ## How Does Bash Pass Work?
 
-Bash Pass detects active system sessions with `loginctl`, then grafts the selected session's environment (`user`, `uid`, `tty`, and session type) into a fresh interactive shell running as the target user. The shell behaves as if it was originally sourced from the target session.
+Bash Pass detects active system sessions with `loginctl`, then grafts the selected session's environment (`user`, `uid`, `tty`, and session type) into a fresh interactive shell running as the target user. The shell behaves as if it was originally sourced[ from the target](url) session.
 
 When the target session ends, or Bash Pass itself is closed, all non-detached processes started through it are ended as well.
 
@@ -130,4 +130,4 @@ The GPL-3.0 grants you the freedom to use, study, share, and modify Bash Pass, p
 
 I originally made this as a small-scale program for myself to help me interact with my HTPC. After using it for a while, I realized how useful Bash Pass could be with some effort. I have no clue what the maximum scope of functionality might be, but I made sure the features I added could work together and cover every edge case I could imagine.  
 
-I used AI to help write code comments, some of the logic-based functionality of this program, the installer (as it’s a simple installer), as well as some README and WIKI text (such as grammar help), all under my scrutiny. Otherwise, everything about this program, from how it interacts with the user to every letter in the help feedback, was written by me directly. Every development decision was mine, and every idea was one I came up with myself. There was never a point where I allowed an AI to steer the course of development. It was a grunt, and not one even worth naming.
+I used AI to help write code comments, some of the logic-based functionality of this program, and some editing/ auditing (such as grammar help & license), all under my scrutiny. Otherwise, everything about this program, from how it interacts with the user to every letter in the help feedback, was created by me directly. Every development decision was mine, and every idea was one I came up with myself. There was never a point where I allowed an AI to steer the course of development.
