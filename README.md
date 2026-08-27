@@ -4,9 +4,7 @@
 
 Tunnel your terminal session into any other system session, allowing "session parasitizing".
 
-<img src="./.assets/hero.png" width="350"/>
-
-*This repo is a part of the Cawnsole collection; Improving the HTPC experience.*
+*This repo is a part of the Cawnsole collection; improving the HTPC experience.*
 
 [![Patreon](https://img.shields.io/badge/Patreon-%23F96854.svg?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/ProCrow) [![Ko-Fi](https://img.shields.io/badge/Ko--fi-%23F16061.svg?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/gwencrow)
 
@@ -14,68 +12,79 @@ Tunnel your terminal session into any other system session, allowing "session pa
 
 ## What Bash Pass Does
 
-Bash Pass allows a shell within the system to access other sessions and parasitize them; allowing the shell to behave as it if was originally sourced from the target session.
-
-The app itself It detects active sessions with `loginctl` and then grafts the selected session's environment into a fresh interactive shell running as the target user.
+Bash Pass allows a shell within the system to access other sessions and parasitize them, allowing the shell to behave as if it was originally sourced from the target session.
 
 When the target session ends, or the app is closed, all non-detached processes will also be ended.
 
-***Bash Pass is basically a back door to your system, use Bash Pass with care, don't be a dunce.***
+<img src="./.assets/accept.png" width="350"/>
 
-##### Session Parasitizing
 
-**The moniker I made for what Bash Pass does is "session parasitizing".** Like a parasite, the app latches onto a host session and uses the host session's own credentials to burrow in and start asserting its will *(maybe a bit too personified of a description, but I think it gets the point across in a fun visual way)*.
+#### Session Parasitizing
 
+**The moniker I made for what Bash Pass does is "session parasitizing".** Like a parasite, the app latches onto a host session and uses the host session's own credentials to burrow in and start asserting its will *(maybe a bit too personified a description, but I think it gets the point across in a fun visual way)*.
+
+#### Security Note
+
+***Bash Pass is basically a back door to your system. Use Bash Pass with care, and don't be a dunce.***
 
 ## Install & Run Bash Pass
 
 #### Requirements
 
-| Required |
-| --- |
-| Linux host with systemd |
-| Root access |
+| Required | Notes |
+| --- | --- |
+| Linux host with systemd | session detection relies on `loginctl` |
+| Root access | Bash Pass will not run without it |
 
 | Semi-Required | Notes |
 | --- | --- |
 | `util-linux` (`script`) | required for `-audit` & `-wanted` arguments |
-| `dialog-utility` | required for '-assist' argument |
+| `dialog-utility` | required for `-assist` argument |
 
 ### Installing Bash Pass
 
 1. Clone the repo, or download from releases
-2. Run the `install-bash-pass.sh` install script
+2. Run the `install-bash-pass.sh` install script or install manually
 
 ### Running Bash Pass
 
-**There are two ways you can run Bash Pass assuming you installed it.**
+Bash Pass can be used in a variety of ways due to its simple and flexible architecture. Simply running Bash Pass plainly is enough for most use cases, but that is the tip of the iceberg. Embedding Bash Pass into larger scripts, making full use of the available arguments, is where the real possibilities are. 
 
-**First**: Run Bash Pass with the command `bashpass` (requires that you installed Bash Pass)
+<img src="./.assets/singular.png" width="350"/>
+<br>
+<img src="./.assets/list.png" width="350"/>
 
-**Second**: Run Bash Pass `pass` file as a regular bash script in a shell
+**Once installed, run Bash Pass with the `bashpass` command**. 
 
-*Bash Pass always requires root access to run.*
+**Alternatively, run the `pass` file directly as a regular bash script in a shell (e.g. `sudo bash pass`).** 
+
+*Both methods require root access.*
 
 ## Using Bash Pass
 
 Bash Pass is stylized as a friendly "pass" creation app, which then uses the created "pass" to access sessions (parasitize onto selected sessions). *This styling of the app extends to its argument names, terminology, and defaults.* 
 
+<img src="./.assets/pass.png" width="350"/>
+
 1. Run Bash Pass **with sudo privilege** from any shell interface (including SSH)
 2. Select the desired session to parasitize
-3. Use the shell as if it was running them locally in that session
+3. Use the shell as if it was running locally in that session
 4. Type `exit` to detach from the session
+
+<img src="./.assets/rescinded.png" width="350"/>
 
 ### Advanced Usage
 
-Bash Pass offers a wide variety of use cases by supporting a large number of arguments; which for the most part can be used with one another to create powerful functionality. The arguments also allows Bash Pass to be embedded within larger workflows.
+Bash Pass offers a wide variety of use cases by supporting a large number of arguments, which for the most part can be used with one another to create powerful functionality. The arguments also allow Bash Pass to be embedded within larger workflows.
 
 | Option | Description |
 | --- | --- |
 | `-silent` | Suppress all visual feedback and menus. |
+| `-assist` | Render the session list with the `dialog` utility for clickable selection. |
 | `-list [SORT]` | Display the detected environments without entering one. If `SORT` is provided, filter the list. |
 | `-pass [DEST]` | Auto-select the first environment matching `DEST` (matched against user, uid, tty, or type), or the special values `oldest` / `latest`. |
-| `-location [PATH]` | Drop into `PATH` upon connection. Fails if the path is missing. |
-| `--location [PATH]` | Drop into `PATH` upon connection. Falls back to the default directory if missing. |
+| `-location [PATH]` | Drop into `PATH` upon connection. Falls back to the default directory if the path is missing. |
+| `--location [PATH]` | Drop into `PATH` upon connection. Fails if the path is missing. |
 | `-audit [PATH]` | Save clean terminal output (ANSI colours stripped) to `PATH` or the default location. |
 | `--audit [PATH]` | Save raw terminal output to `PATH` or the default location. |
 | `-wanted [STR] [CMD]` | Monitor the session stream for `STR`. Exits when it appears, or executes `CMD` if provided. |
@@ -84,13 +93,6 @@ Bash Pass offers a wide variety of use cases by supporting a large number of arg
 | `-last [CMD]` | Execute `CMD` automatically when the session terminates. |
 | `-timer [TIME]` | Set an automatic disconnect timeout (e.g. `3.5d`, `5D2H`, `30m`, `10s`). |
 | `-help` | Display the full option reference and exit. |
+| `-version` | Display the current version number. |
 
-*For a more detailed breakdown of how to use each argument (with examples) check the wiki markdown.*
-
-### Notes
-
-- Audit files default to `/tmp/bash-pass/audits/`.
-- `-only` cannot be combined with `-first` or `-last`.
-- `-wanted` without `CMD` ends the session the moment `STR` appears.
-- `-pass` / `-list` matching is a substring match against any column. Graphical sessions are labelled `wayland display` / `x11 display`, so `-pass display` targets the first graphical session.
-- `-silent` is handy for automation: no menus, no banners, no flavour text.
+*For a more detailed breakdown of how to use each argument (with examples), check the `WIKI.md`.*

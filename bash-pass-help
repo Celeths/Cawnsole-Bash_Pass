@@ -43,6 +43,8 @@ else
     BRIGHT_RED=""; BRIGHT_GREEN=""; BRIGHT_BLUE=""; BRIGHT_YELLOW=""
     BOLD=""; BLINK=""; ULINE=""; R_ULINE=""; RESET=""
 fi
+TTY_OUT=0
+[ -t 1 ] && TTY_OUT=1
 
 # wrap: reflow lines that overflow the terminal so wrapped continuation
 # lines keep the 24-space indent (column 24). Lines that fit pass through
@@ -62,7 +64,10 @@ wrap() {
         indent='        '
         narrow=1
     fi
-    awk -v cols="$cols" -v indent="$indent" -v narrow="$narrow" '
+    awk -v cols="$cols" -v indent="$indent" -v narrow="$narrow" -v tty="$TTY_OUT" '
+    # reset: SGR reset only when stdout is a terminal; piped help output
+    # stays clean for logs and integrations.
+    BEGIN { reset = (tty ? "\033[0m" : "") }
     # endcol: display column after s, starting at col; tabs expand to the
     # next 8-column stop, ANSI sequences are zero-width.
     function endcol(s, col,   i, n, c) {
@@ -136,7 +141,7 @@ wrap() {
             unit = word spaces
             uend = endcol(unit, col)
             if (col > 0 && uend > cols) {
-                print chunk "\033[0m"
+                print chunk reset
                 chunk = indent open word spaces
                 col = endcol(unit, endcol(indent open, 0))
             } else {
@@ -146,7 +151,7 @@ wrap() {
             open = scansgr(unit, open)
             i = k
         }
-        if (chunk != "") print chunk "\033[0m"
+        if (chunk != "") print chunk reset
     }'
 }
 

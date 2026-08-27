@@ -1,3 +1,5 @@
 # OS files
 .DS_Store
 Icon?
+# Agent test artifacts
+TEST_FILES/

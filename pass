@@ -95,6 +95,18 @@ bp_assign() {  # "Automatically Assigning Pass" (banner subtitle)
     BP_ASSIGN_SHOWN=1
 }
 
+# Ctrl+C is not assigned to anything outside session selection: the trap is
+# a pure no-op so apps running inside the session can be interrupted
+# normally, the interactive session shell handles SIGINT itself, and pass
+# never dies from it. (Without any handler at all, bash would kill the
+# script right after a Ctrl+C-interrupted child exits; an ignore trap
+# instead would leak SIG_IGN into the session shell and its apps, making
+# Ctrl+C unkillable — both wrong.) Registered here, before the selection
+# menu, so it also protects the dialog stage. The selection prompt checks
+# the interrupted read's status and is the only place that turns Ctrl+C
+# into an exit.
+trap ':' SIGINT
+
 # Terminal-identity variables describe the CLIENT's terminal (the display
 # surface the user is actually looking at), NOT the target session's. They
 # must never be grafted from the leader's session later on, or TUI apps
@@ -115,6 +127,7 @@ ASSIST=0
 SORT=""
 PASS_DEST=""
 PASS_FIRST=0
+ONLY=0
 ONLY_CMD=""
 FIRST_CMD=""
 LAST_CMD=""
@@ -135,8 +148,8 @@ AUDIT_NAME_CONFLICT=0
 DESIRED_AUDIT_FILE=""
 DESIRED_AUDIT_DIR=""
 CUSTOM_AUDIT_PATH=""
-WANTED_STR=""
-WANTED_CMD=""
+WANTED_STRS=()
+WANTED_CMDS=()
 
 # fmt_duration: format a second count in compact units — 600 → "10m",
 # 605 → "10m5s", 3665 → "1h1m5s" (zero units are omitted, seconds included
@@ -163,8 +176,24 @@ warn_expired() {
     if [ -n "$2" ]; then
         printf "Your ${YELLOW}timer${RESET} has ${ULINE}${BRIGHT_BLUE}$(fmt_duration "$2")${RESET} ${YELLOW}remaining${RESET}\r\n"
     fi
-    B_PID=$(pgrep -f "bash --rcfile $PAYLOAD" 2>/dev/null | tail -n 1)
+    B_PID=$(session_shell_pid)
     [ -n "$B_PID" ] && kill -INT "$B_PID" 2>/dev/null
+}
+
+# session_shell_pid: resolve the live session shell by process tree — the
+# bash directly under the sudo wrapper whose command line contains
+# "--rcfile <payload>". Exact fixed-string matching on sudo's space-joined
+# cmdline (trailing space included so one payload path cannot prefix-match
+# another); no regex metacharacter surprises from the payload path.
+session_shell_pid() {
+    local P SPID
+    for P in $(pgrep -x sudo 2>/dev/null); do
+        if tr '\0' ' ' < "/proc/$P/cmdline" 2>/dev/null | grep -Fq -- "--rcfile $PAYLOAD "; then
+            SPID=$P
+            break
+        fi
+    done
+    [ -n "${SPID:-}" ] && pgrep -P "$SPID" -x bash 2>/dev/null | tail -n 1
 }
 
 # sq: escape single quotes so a value can be embedded safely inside the payload's
@@ -281,7 +310,12 @@ if [ "$#" -gt 0 ]; then
                     STRICT_LOC=1
                     shift 2
                 else
-                    shift
+                    [ "$SILENT" -ne 1 ] && {
+                        bp_error
+                        printf -- "${ULINE}${YELLOW}--location${RESET} ${CYAN}requires${RESET} a ${YELLOW}path argument${RESET}\n"
+                        printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                    }
+                    exit 1
                 fi
                 ;;
             -audit)
@@ -303,18 +337,41 @@ if [ "$#" -gt 0 ]; then
                 fi
                 ;;
             -wanted)
+                # Repeatable: each use appends its watch strings, so multiple
+                # -wanted arguments stay active. [STR] may be a comma-separated
+                # list ("a","b"), letting one argument watch several values.
+                # The optional [CMD] applies to every string of this use.
                 if [[ -n "$2" && "$2" != -* ]]; then
-                    WANTED_STR="$2"
+                    WANTED_ARG_STR="$2"
+                    WANTED_ARG_CMD=""
                     if [[ -n "$3" && "$3" != -* ]]; then
-                        WANTED_CMD="$3"
+                        WANTED_ARG_CMD="$3"
                         shift 3
                         # Join any further non-flag words into the command
                         while [[ -n "$1" && "$1" != -* ]]; do
-                            WANTED_CMD+=" $1"
+                            WANTED_ARG_CMD+=" $1"
                             shift
                         done
                     else
                         shift 2
+                    fi
+                    # Split [STR] on commas and trim whitespace around each part
+                    WANTED_USE_ADDED=0
+                    IFS=',' read -ra WANTED_PARTS <<< "$WANTED_ARG_STR"
+                    for WANTED_PART in "${WANTED_PARTS[@]}"; do
+                        WANTED_PART="${WANTED_PART#"${WANTED_PART%%[![:space:]]*}"}"
+                        WANTED_PART="${WANTED_PART%"${WANTED_PART##*[![:space:]]}"}"
+                        if [ -n "$WANTED_PART" ]; then
+                            WANTED_STRS+=("$WANTED_PART")
+                            WANTED_CMDS+=("$WANTED_ARG_CMD")
+                            WANTED_USE_ADDED=1
+                        fi
+                    done
+                    if [ "$WANTED_USE_ADDED" -eq 0 ]; then
+                        bp_error
+                        printf -- "${ULINE}${YELLOW}-wanted${RESET} ${CYAN}requires${RESET} a ${YELLOW}search string${RESET}\n"
+                        printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
+                        exit 1
                     fi
                 else
                     bp_error
@@ -333,12 +390,10 @@ if [ "$#" -gt 0 ]; then
                         shift
                     done
                 else
-                    [ "$SILENT" -ne 1 ] && {
-                        bp_error
-                        printf -- "${ULINE}${YELLOW}-only${RESET} ${CYAN}requires${RESET} a ${YELLOW}command argument${RESET}\n"
-                        printf "${CYAN}Use${RESET} ${ULINE}${YELLOW}-help${RESET} for ${CYAN}information${RESET} about ${GREEN}proper use${RESET}\n"
-                    }
-                    exit 1
+                    # No [CMD] given: per the wiki, connect, execute nothing,
+                    # and immediately disconnect from the session.
+                    ONLY=1
+                    shift
                 fi
                 ;;
             -first)
@@ -461,7 +516,16 @@ if [ "$#" -gt 0 ]; then
             -help|-h|--help)
                 # Styled help lives in bash-pass-help (same directory); it
                 # defines its own style variables and also runs standalone.
-                source "$(dirname "$0")/bash-pass-help"
+                HELP_FILE="$(dirname "$0")/bash-pass-help"
+                if [ ! -f "$HELP_FILE" ]; then
+                    [ "$SILENT" -ne 1 ] && {
+                        bp_error
+                        printf -- "${ULINE}${YELLOW}bash-pass-help${RESET} ${RED}is ${ULINE}missing${RESET} from ${CYAN}${ULINE}$(dirname "$0")${RESET}\n"
+                        printf "${CYAN}Reinstall${RESET} ${GREEN}Bash Pass${RESET} or ${CYAN}place${RESET} the ${YELLOW}help file${RESET} next to the ${GREEN}app${RESET}\n"
+                    }
+                    exit 1
+                fi
+                source "$HELP_FILE"
                 exit 0
                 ;;
             -version|--version)
@@ -478,7 +542,7 @@ if [ "$#" -gt 0 ]; then
     done
 fi
 
-if [ -n "$ONLY_CMD" ]; then
+if [ -n "$ONLY_CMD" ] || [ "$ONLY" -eq 1 ]; then
     if [ -n "$FIRST_CMD" ] || [ -n "$LAST_CMD" ]; then
         [ "$SILENT" -ne 1 ] && {
             bp_error
@@ -614,7 +678,21 @@ else
             }
             exit 1
         fi
-        
+
+        # -list must display without entering: with a resolved destination,
+        # show the single matched row in the same table format and stop.
+        if [ "$LIST" -eq 1 ]; then
+            T_UID=$(id -u "${USERS[$SEL]}" 2>/dev/null)
+            T_TTY="${TTYS[$SEL]:-Headless}"
+            T_TYPE="${PRINT_TYPES[$SEL]}"
+            T_USER="${USERS[$SEL]}"
+            printf "${BOLD}│${RESET} ${BLUE}${BOLD}NUM${RESET} | ${GREEN}${BOLD}USER${RESET} | ${YELLOW}${BOLD}UID${RESET} | ${CYAN}${BOLD}TTY${RESET} | ${YELLOW}${BOLD}TYPE${RESET} ${BOLD}│${RESET}\n"
+            printf "${BOLD}├───────────────────────────────┘${RESET}\n"
+            printf "${BOLD}│${RESET} ${BLUE}${BOLD}%d)${RESET} ${GREEN}%s${RESET} | ${YELLOW}%s${RESET} | ${CYAN}%s${RESET} | ${YELLOW}%s${RESET}\n" "$SEL" "$T_USER" "$T_UID" "$T_TTY" "$T_TYPE"
+            printf "${BOLD}└────────────────────────────────${RESET}\n"
+            exit 0
+        fi
+
         [ "$SILENT" -ne 1 ] && {
             clear
             bp_title
@@ -643,7 +721,7 @@ else
                     bp_error
                     printf "${RED}No results${RESET} ${CYAN}found${RESET} for ${ULINE}${YELLOW}${SORT}${RESET}\n"
                 }
-                exit 0
+                exit 1
             fi
         fi
 
@@ -674,8 +752,9 @@ else
             DRC=$?
             exec 3>&-
             if [ "$DRC" -ne 0 ]; then
-                # Cancel/ESC: dialog leaves its screen behind — reset the
-                # terminal attributes and repaint before exiting
+                # Cancel/ESC/Ctrl+C: the selection stage is the one place
+                # Ctrl+C may exit the app. dialog leaves its screen behind —
+                # reset the terminal attributes and repaint before exiting.
                 tput sgr0 2>/dev/null
                 tput cnorm 2>/dev/null
                 clear
@@ -711,14 +790,41 @@ else
         fi
         
         [ "$SILENT" -ne 1 ] && printf "${CYAN}Select${RESET} the ${ULINE}${GREEN}desired session${RESET} by ${BRIGHT_BLUE}number${RESET} to ${YELLOW}create${RESET} a ${BRIGHT_GREEN}pass${RESET}\n"
-        read -r -p "> " SEL
+        # The selection prompt is the one place Ctrl+C may exit the app:
+        # while reading, the SIGINT no-op trap is temporarily cleared so the
+        # signal interrupts read immediately (a set trap would be deferred
+        # until read returned). Invalid input re-prompts; "exit" and EOF
+        # (window close) also end the run.
+        while true; do
+            trap - SIGINT
+            read -r -p "> " SEL
+            rc=$?
+            trap ':' SIGINT
+            if [ "$rc" -gt 128 ]; then
+                # Interrupted by Ctrl+C: leave the app, silently (keep the
+                # caller's prompt on its own line)
+                printf '\n'
+                exit 130
+            fi
+            if [ "$rc" -ne 0 ]; then
+                # EOF: the input stream (window) closed
+                exit 1
+            fi
+            [ "$SEL" = "exit" ] && exit 0
+            if [[ ! "$SEL" =~ ^[0-9]+$ ]] || [ -z "${USERS[$SEL]}" ]; then
+                [ "$SILENT" -ne 1 ] && {
+                    bp_error
+                    printf "${YELLOW}${SEL}${RESET} ${RED}is not within${RESET} ${CYAN}available range${RESET}: ${BRIGHT_BLUE}1-${#USERS[@]}${RESET}\n"
+                }
+                continue
+            fi
+            break
+        done
         fi
         
+        # Dialog safety net: dialog returns an index tag directly, but never
+        # trust it blindly.
         if [[ ! "$SEL" =~ ^[0-9]+$ ]] || [ -z "${USERS[$SEL]}" ]; then
-            [ "$SILENT" -ne 1 ] && {
-                bp_error
-                printf "${YELLOW}${SEL}${RESET} ${RED}is not within${RESET} ${CYAN}available range${RESET}: ${BRIGHT_BLUE}1-${#USERS[@]}${RESET}\n"
-            }
             exit 1
         fi
     fi
@@ -726,6 +832,16 @@ fi
 
 # Process Location
 if [ -n "$LOCATION" ]; then
+    # Expand a literal ~ or ~/ path to the target session owner's home
+    # (help/WIKI: ~/ is shorthand for /home/[user]/). Unquoted ~ is
+    # normally expanded by the caller's shell first; this covers quoted use.
+    if [[ "$LOCATION" == "~" ]]; then
+        TARGET_HOME=$(getent passwd "${USERS[$SEL]}" 2>/dev/null | cut -d: -f6)
+        [ -n "$TARGET_HOME" ] && LOCATION="$TARGET_HOME"
+    elif [[ "$LOCATION" == "~/"* ]]; then
+        TARGET_HOME=$(getent passwd "${USERS[$SEL]}" 2>/dev/null | cut -d: -f6)
+        [ -n "$TARGET_HOME" ] && LOCATION="${TARGET_HOME}/${LOCATION#\~/}"
+    fi
     if [ ! -d "$LOCATION" ]; then
         if [ "$STRICT_LOC" -eq 1 ]; then
             [ "$SILENT" -ne 1 ] && {
@@ -758,10 +874,10 @@ elif [[ -n "$TTY" ]]; then
 fi
 
 # Audit & Wanted Configuration & Verification
-if [ -n "$AUDIT_MODE" ] || [ -n "$WANTED_STR" ]; then
+if [ -n "$AUDIT_MODE" ] || [ "${#WANTED_STRS[@]}" -gt 0 ]; then
     if ! command -v script >/dev/null 2>&1; then
         [ "$SILENT" -ne 1 ] && {
-            if [ -n "$WANTED_STR" ]; then
+            if [ "${#WANTED_STRS[@]}" -gt 0 ]; then
                 bp_error
                 printf -- "${ULINE}${YELLOW}-wanted${RESET} ${RED}requires${RESET} the ${ULINE}${CYAN}script utility${RESET} to ${GREEN}run${RESET}\n"
                 printf "${CYAN}Install${RESET} the ${ULINE}${YELLOW}util-linux package${RESET} to ${CYAN}use${RESET} this ${YELLOW}argument${RESET}\n"
@@ -853,25 +969,49 @@ PAYLOAD=$(mktemp)
 RUN_CMD="sudo -u \"$T_USER\" /bin/bash --rcfile \"$PAYLOAD\" -i"
 
 # Global Cleanup Handler
-cleanup_daemons() {
+# Split in two so signal handlers can tear down the daemons without deleting
+# $PAYLOAD: a Ctrl+C at the selection prompt must not remove the rcfile the
+# session shell is about to read. $PAYLOAD removal stays on EXIT only.
+cleanup_watchdogs() {
+    # Reap each daemon's children BEFORE the daemon itself: once the parent
+    # dies, the kernel reparents the children and pkill -P would miss them.
     if [ -n "$WATCHDOG_PID" ]; then
-        kill "$WATCHDOG_PID" 2>/dev/null
         pkill -P "$WATCHDOG_PID" 2>/dev/null
+        kill "$WATCHDOG_PID" 2>/dev/null
     fi
     if [ -n "$WANTED_PID" ]; then
-        kill "$WANTED_PID" 2>/dev/null
         pkill -P "$WANTED_PID" 2>/dev/null
+        kill "$WANTED_PID" 2>/dev/null
     fi
+}
+cleanup_daemons() {
+    cleanup_watchdogs
     if [ -f "$PAYLOAD" ]; then
         rm -f "$PAYLOAD"
     fi
+    # A signal-path exit (SIGTERM/SIGHUP/SIGQUIT) skips the normal audit
+    # processing, so drop the raw capture here too; it is unset until the
+    # session-wrapper path starts.
+    if [ -n "${RAW_AUDIT:-}" ]; then
+        rm -f "$RAW_AUDIT"
+    fi
 }
-trap cleanup_daemons EXIT SIGINT SIGTERM SIGHUP SIGQUIT
+trap cleanup_daemons EXIT
+# The SIGINT no-op trap is registered near the top of the script (before
+# the selection menu). Closing the app must end the session: on termination
+# signals, tear the session down (same escalation as the watchdog) and stop.
+# kill_payload is defined below; the trap string resolves it at fire time.
+trap 'cleanup_watchdogs; kill_payload; exit 143' SIGTERM SIGHUP SIGQUIT
 
 # Kill function to gracefully and forcefully terminate the session and all wrappers
 kill_payload() {
     local B_PID
-    B_PID=$(pgrep -f "bash --rcfile $PAYLOAD" 2>/dev/null | head -n 1)
+    # The wrapper chain (script -> sudo -> session bash) all contain the
+    # payload path in their command lines; resolve the session shell itself
+    # by process tree so the graceful USR1 (its payload trap runs exit 0,
+    # firing any -last EXIT trap) never lands on a wrapper or a forked
+    # subshell of the session.
+    B_PID=$(session_shell_pid)
     
     if [ -n "$B_PID" ]; then
         kill -USR1 "$B_PID" 2>/dev/null
@@ -910,7 +1050,7 @@ echo "stty -echoctl" >> "$PAYLOAD"  # Hide that ^C
 while IFS= read -r -d '' var; do
     V_NAME="${var%%=*}"
     # Proceed only if the variable name is valid and NOT in the read-only exclusion list
-    if [[ "$V_NAME" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] && [[ ! "$V_NAME" =~ ^(UID|EUID|PPID|SHELLOPTS|BASHOPTS)$ ]]; then
+    if [[ "$V_NAME" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] && [[ ! "$V_NAME" =~ ^(UID|EUID|PPID|SHELLOPTS|BASHOPTS|PWD|OLDPWD)$ ]]; then
         # Never graft terminal-identity variables from the target session — see TERM_IDENTITY above
         for TV in "${TERM_IDENTITY_NAMES[@]}"; do
             [ "$V_NAME" == "$TV" ] && continue 2
@@ -976,6 +1116,9 @@ fi
 
 if [ -n "$LOCATION" ]; then
     echo "cd $(printf "%q" "$LOCATION") 2>/dev/null" >> "$PAYLOAD"
+else
+    # Default location is the target session owner's home (per help/WIKI).
+    echo "cd ~ 2>/dev/null" >> "$PAYLOAD"
 fi
 
 if [ -n "$FIRST_CMD" ]; then
@@ -983,8 +1126,8 @@ if [ -n "$FIRST_CMD" ]; then
     echo "( $FIRST_CMD </dev/null & )" >> "$PAYLOAD"
 fi
 
-if [ -n "$ONLY_CMD" ]; then
-    echo "( $ONLY_CMD </dev/null & )" >> "$PAYLOAD"
+if [ -n "$ONLY_CMD" ] || [ "$ONLY" -eq 1 ]; then
+    [ -n "$ONLY_CMD" ] && echo "( $ONLY_CMD </dev/null & )" >> "$PAYLOAD"
     echo "builtin exit 0" >> "$PAYLOAD"
 fi
 
@@ -1020,6 +1163,11 @@ chmod 600 "$PAYLOAD"
 
 # Monitor the leader process and timer threshold
 (
+    # The parent's traps would cascade a second teardown back into the
+    # session if this watchdog were signalled, and the inherited EXIT trap
+    # would delete $PAYLOAD from inside the subshell; reset them all so the
+    # cleanup kill ends this subshell outright.
+    trap - EXIT SIGTERM SIGHUP SIGQUIT
     ELAPSED=0
     TERMINATED_BY_TIMER=0
     TIMEXEC_FIRED=()
@@ -1059,18 +1207,34 @@ chmod 600 "$PAYLOAD"
     }
     
     kill_payload
-    # No orphans: kill any exec still running in this subshell before exiting
-    pkill -P $$ 2>/dev/null
+    # No orphans: kill any exec still running in this subshell before exiting.
+    # $BASHPID names this watchdog subshell itself — $$ would name the parent
+    # pass process and sweep unrelated siblings (and miss these exec'd
+    # children).
+    pkill -P "$BASHPID" 2>/dev/null
 ) &
 WATCHDOG_PID=$!
 
 # Execute the shell with the payload with rcfile
-if [ -n "$AUDIT_MODE" ] || [ -n "$WANTED_STR" ]; then
+if [ -n "$AUDIT_MODE" ] || [ "${#WANTED_STRS[@]}" -gt 0 ]; then
     RAW_AUDIT=$(mktemp)
     
-    if [ -n "$WANTED_STR" ]; then
+    if [ "${#WANTED_STRS[@]}" -gt 0 ]; then
         (
-            # Continuously monitor the session stream. Use unbuffered sed to strip ANSI escapes and resolve terminal backspaces.
+            # Continuously monitor the session stream for ANY watch string. Use
+            # unbuffered sed to strip ANSI escapes and resolve terminal
+            # backspaces; grep -o then records the exact string that matched
+            # first (fixed-string matches, one -e per watch string).
+            WANTED_GREP_ARGS=()
+            for WANTED_ONE in "${WANTED_STRS[@]}"; do
+                WANTED_GREP_ARGS+=(-e "$WANTED_ONE")
+            done
+            WANTED_MATCH_FILE=$(mktemp)
+            # Remove the match file however this monitor ends: EXIT covers
+            # the normal completion path, TERM/HUP cover the teardown kills
+            # (bash does not run EXIT traps on untrapped-signal death).
+            trap 'rm -f "$WANTED_MATCH_FILE"' EXIT
+            trap 'rm -f "$WANTED_MATCH_FILE"; exit 0' SIGTERM SIGHUP
             tail -n +1 -f "$RAW_AUDIT" 2>/dev/null | \
             sed -u -E -e 's/\x1B\][^\x07\x1B]*(\x07|\x1B\\)//g' \
                       -e 's/\x1B\[[0-9;?]*[A-Za-z]//g' \
@@ -1078,28 +1242,51 @@ if [ -n "$AUDIT_MODE" ] || [ -n "$WANTED_STR" ]; then
                       -e ':a' -e 's/[^\x08\x7F][\x08\x7F]//g' -e 't a' \
                       -e 's/[\x08\x7F]//g' \
                       -e 's/\r//g' | \
-            grep -q -m 1 -F "$WANTED_STR"
-            
-            if [ $? -eq 0 ]; then
+            grep -m 1 -o -F "${WANTED_GREP_ARGS[@]}" > "$WANTED_MATCH_FILE" &
+            WANTED_GREP_PID=$!
+            # Poll for the recorded match. A quiet stream leaves tail/sed
+            # alive after grep exits, and `wait` would block on them, so the
+            # monitor watches grep's liveness instead of waiting on the pipe.
+            WANTED_MATCH=""
+            while [ -z "$WANTED_MATCH" ] && kill -0 "$WANTED_GREP_PID" 2>/dev/null; do
+                sleep 0.1
+                WANTED_MATCH=$(head -n 1 "$WANTED_MATCH_FILE" 2>/dev/null)
+            done
+            # Reap the stream watchers before acting (grep is done by now).
+            # $BASHPID — not $$, which still names the parent pass process —
+            # so only this monitor's own tail/sed/grep children are killed.
+            pkill -P "$BASHPID" 2>/dev/null
+            rm -f "$WANTED_MATCH_FILE"
+    
+            if [ -n "$WANTED_MATCH" ]; then
                 # Delay slightly to allow the PTY to visually render the final keystroke
                 sleep 0.3
-                
-                if [ -n "$WANTED_CMD" ]; then
+    
+                # Find the [CMD] belonging to the matched string
+                WANTED_MATCH_CMD=""
+                for ((i=0; i<${#WANTED_STRS[@]}; i++)); do
+                    if [ "${WANTED_STRS[$i]}" == "$WANTED_MATCH" ]; then
+                        WANTED_MATCH_CMD="${WANTED_CMDS[$i]}"
+                        break
+                    fi
+                done
+    
+                if [ -n "$WANTED_MATCH_CMD" ]; then
                     [ "$SILENT" -ne 1 ] && {
                         bp_wanted
-                        printf "${CYAN}Target${RESET} ${ULINE}${YELLOW}%s${RESET} has ${GREEN}appeared${RESET}\r\n" "$WANTED_STR"
-                        printf "${CYAN}Executing:${RESET} ${ULINE}${YELLOW}%s${RESET}\r\n" "$WANTED_CMD"
+                        printf "${CYAN}Target${RESET} ${ULINE}${YELLOW}%s${RESET} has ${GREEN}appeared${RESET}\r\n" "$WANTED_MATCH"
+                        printf "${CYAN}Executing:${RESET} ${ULINE}${YELLOW}%s${RESET}\r\n" "$WANTED_MATCH_CMD"
                     }
-                    eval "$WANTED_CMD"
+                    eval "$WANTED_MATCH_CMD"
                     # Return the caret to the session prompt (same as the timer warning)
                     [ "$SILENT" -ne 1 ] && {
-                        B_PID=$(pgrep -f "bash --rcfile $PAYLOAD" 2>/dev/null | tail -n 1)
+                        B_PID=$(session_shell_pid)
                         [ -n "$B_PID" ] && kill -INT "$B_PID" 2>/dev/null
                     }
                 else
                     [ "$SILENT" -ne 1 ] && {
                         bp_wanted
-                        printf "${CYAN}Target${RESET} ${ULINE}${YELLOW}%s${RESET} has ${GREEN}appeared${RESET}\r\n" "$WANTED_STR"
+                        printf "${CYAN}Target${RESET} ${ULINE}${YELLOW}%s${RESET} has ${GREEN}appeared${RESET}\r\n" "$WANTED_MATCH"
                         printf "${YELLOW}Rescinding${RESET} your ${BRIGHT_GREEN}pass${RESET}\r\n"
                     }
                     kill_payload
@@ -1112,28 +1299,31 @@ if [ -n "$AUDIT_MODE" ] || [ -n "$WANTED_STR" ]; then
     # Run the interactive bash wrapper internally via script, utilizing -f to flush stream outputs
     script -q -f -e -c "$RUN_CMD" "$RAW_AUDIT"
     
-    if [ -n "$WANTED_STR" ]; then
+    if [ "${#WANTED_STRS[@]}" -gt 0 ]; then
         # Give the monitor time to finish printing if the marker appeared right
         # at the end of the session (it sleeps 0.3s after a match before acting)
         sleep 1
-        kill "$WANTED_PID" 2>/dev/null
+        # Children first, then the monitor itself (see cleanup_watchdogs)
         pkill -P "$WANTED_PID" 2>/dev/null
+        kill "$WANTED_PID" 2>/dev/null
     fi
     
-    # Write via a fresh file in the same directory and rename into place, so a
-    # symlink planted at the audit path is replaced, never followed (TOCTOU fix)
-    AUDIT_TMP=$(mktemp "$(dirname "$AUDIT_PATH")/.audit.XXXXXX" 2>/dev/null)
-    if [ -n "$AUDIT_TMP" ]; then
-        if [ "$AUDIT_MODE" == "clean" ]; then
-            # Strip OSC shell integration sequences and ANSI colors, retaining general output and exit codes
-            sed -E -e 's/\x1B\][^\x07\x1B]*(\x07|\x1B\\)//g' \
-                   -e 's/\x1B\[[0-9;?]*[A-Za-z]//g' \
-                   -e 's/\x1B[()][A-Za-z]//g' "$RAW_AUDIT" | \
-            col -b > "$AUDIT_TMP"
-        elif [ "$AUDIT_MODE" == "raw" ]; then
-            cat "$RAW_AUDIT" > "$AUDIT_TMP"
+    if [ -n "$AUDIT_MODE" ]; then
+        # Write via a fresh file in the same directory and rename into place, so a
+        # symlink planted at the audit path is replaced, never followed (TOCTOU fix)
+        AUDIT_TMP=$(mktemp "$(dirname "$AUDIT_PATH")/.audit.XXXXXX" 2>/dev/null)
+        if [ -n "$AUDIT_TMP" ]; then
+            if [ "$AUDIT_MODE" == "clean" ]; then
+                # Strip OSC shell integration sequences and ANSI colors, retaining general output and exit codes
+                sed -E -e 's/\x1B\][^\x07\x1B]*(\x07|\x1B\\)//g' \
+                       -e 's/\x1B\[[0-9;?]*[A-Za-z]//g' \
+                       -e 's/\x1B[()][A-Za-z]//g' "$RAW_AUDIT" | \
+                col -b > "$AUDIT_TMP"
+            elif [ "$AUDIT_MODE" == "raw" ]; then
+                cat "$RAW_AUDIT" > "$AUDIT_TMP"
+            fi
+            mv -f "$AUDIT_TMP" "$AUDIT_PATH" 2>/dev/null
         fi
-        mv -f "$AUDIT_TMP" "$AUDIT_PATH" 2>/dev/null
     fi
     
     if [ -n "$AUDIT_MODE" ]; then
